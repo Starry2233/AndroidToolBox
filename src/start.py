@@ -59,6 +59,22 @@ key = False
 
 LINE = "-" * 68
 
+def page_transition(text: str = "", duration: float = 0.35) -> None:
+    """Simple console transition animation when switching pages."""
+    msg = text.strip() or "正在切换..."
+    frames = ["", ".", "..", "...", " ..", "  ."]
+    end_time = time.monotonic() + duration
+    width = len(msg) + 4
+    while time.monotonic() < end_time:
+        for frame in frames:
+            if time.monotonic() >= end_time:
+                break
+            sys.stdout.write(f"\r{msg}{frame:<3}")
+            sys.stdout.flush()
+            time.sleep(max(duration / (len(frames) * 2), 0.02))
+    sys.stdout.write("\r" + " " * width + "\r")
+    sys.stdout.flush()
+
 # session = subprocess.Popen(["cmd.exe"], shell=True)
 
 Option = Tuple[str, str]
@@ -251,6 +267,7 @@ def menu_choice(
 
 
 def choose(message: str, options: Iterable[Option], default: str | None = None, extra_bindings: KeyBindings | None = None):
+    page_transition(message or "正在切换...")
     return menu_choice(message=message, options=options, default=default, style_override=style, extra_bindings=extra_bindings)
 
 def set_env_variable(name, value, user=True):
