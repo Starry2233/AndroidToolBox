@@ -5,6 +5,7 @@ import sys
 import shutil
 import platform
 import time
+import asyncio
 from typing import Optional, Tuple, Iterable, List
 from prompt_toolkit import (
     print_formatted_text, 
@@ -19,7 +20,8 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.widgets import RadioList
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.mouse_events import MouseEventType, MouseButton
 import colorama
 import subprocess
@@ -73,34 +75,30 @@ def menu_choice(
     if not option_list:
         raise ValueError("menu_choice requires at least one option")
 
-    display_options = [
-        (value, f"{i + 1}. {label}")
-        for i, (value, label) in enumerate(option_list)
-    ]
-
-    radio = RadioList(
-        display_options,
-        show_numbers=False,
-        open_character=" ",
-        select_character=" ",
-        close_character=" ",
-    )
+    selected_index = 0
+    display_index = 0
+    animate_in = True
+    visible_count = 0 if animate_in else len(option_list)
+    move_task = None
 
     if default is not None:
         for idx, (value, _) in enumerate(option_list):
             if value == default:
-                radio._selected_index = idx
+                selected_index = idx
+                display_index = idx
                 break
-
-    if radio._selected_index is None:
-        radio._selected_index = 0
+    if default is not None:
+        for idx, (value, _) in enumerate(option_list):
+            if value == default:
+                selected_index = idx
+                break
 
     kb = KeyBindings()
 
     @kb.add("enter", eager=True)
     @kb.add(" ", eager=True)
     def _(event):
-        idx = radio._selected_index or 0
+        idx = selected_index or 0
         event.app.exit(result=option_list[idx][0])
 
     digit_buf = {"text": "", "t": 0.0}
@@ -116,33 +114,100 @@ def menu_choice(
         except ValueError:
             return
         if 0 <= idx < len(option_list):
-            radio._selected_index = idx
-            event.app.invalidate()
+            _set_selection(idx, event)
 
     for d in "0123456789":
         @kb.add(d, eager=True)
         def _(event, _d=d):
             _select_by_number(event, _d)
 
-    orig_mouse_handler = radio.control.mouse_handler
+    def _clamp(idx: int) -> int:
+        count = len(option_list)
+        return max(0, min(count - 1, idx))
+
+    def _animate_move(target: int, app):
+        nonlocal display_index, move_task
+        if move_task and not move_task.done():
+            move_task.cancel()
+
+        async def _run():
+            nonlocal display_index
+            while display_index != target:
+                step = 1 if display_index < target else -1
+                display_index += step
+                app.invalidate()
+                await asyncio.sleep(0.02)
+            app.invalidate()
+
+        move_task = app.create_background_task(_run())
+
+    def _set_selection(idx: int, event):
+        nonlocal selected_index, display_index
+        selected_index = _clamp(idx)
+        _animate_move(selected_index, event.app)
+
+    @kb.add("up")
+    @kb.add("k")
+    def _(event):
+        _set_selection(selected_index - 1, event)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _(event):
+        _set_selection(selected_index + 1, event)
+
     last_click = {"idx": None, "t": 0.0}
 
     def mouse_handler(mouse_event):
-        if orig_mouse_handler:
-            orig_mouse_handler(mouse_event)
-            get_app().invalidate()
+        nonlocal selected_index
+        if mouse_event.event_type not in (MouseEventType.MOUSE_UP, MouseEventType.MOUSE_MOVE):
+            return NotImplemented
+
+        y = mouse_event.position.y
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            return None
+        if 0 <= y < current_len:
+            _set_selection(y, get_app())
 
         if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
             now = time.monotonic()
-            idx = radio._selected_index
+            idx = selected_index
             if idx == last_click["idx"] and (now - last_click["t"]) <= 0.5:
-                sel = idx or 0
-                value = radio.current_value or option_list[sel][0]
+                value = option_list[idx][0]
                 get_app().exit(result=value)
             last_click["idx"] = idx
             last_click["t"] = now
+        return None
 
-    radio.control.mouse_handler = mouse_handler
+    def render_lines():
+        fragments = []
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            current_len = 1
+        current_len = min(current_len, len(option_list))
+        sel = min(display_index, current_len - 1)
+
+        for idx, (_, label) in enumerate(option_list[:current_len]):
+            pointer = ">" if idx == sel else " "
+            prefix = f" {pointer} " if idx == sel else "   "
+            text = f"{prefix}{idx + 1}. {label}"
+            style_class = "class:radio-selected" if idx == sel else "class:radio"
+            fragments.append((style_class, text))
+            if idx != current_len - 1:
+                fragments.append(("", "\n"))
+        return fragments
+
+    class MenuControl(FormattedTextControl):
+        def __init__(self, render_fn, handler):
+            super().__init__(render_fn, focusable=True, show_cursor=False)
+            self._handler = handler
+
+        def mouse_handler(self, mouse_event):
+            return self._handler(mouse_event)
+
+    control = MenuControl(render_lines, mouse_handler)
+    window = Window(content=control, always_hide_cursor=True, dont_extend_width=True, dont_extend_height=True)
 
     radio_style = Style.from_dict(
         {
@@ -159,15 +224,27 @@ def menu_choice(
     kb_final = merge_key_bindings([kb, extra_bindings]) if extra_bindings else kb
 
     app = Application(
-        layout=Layout(radio, focused_element=radio),
+        layout=Layout(window, focused_element=control),
         key_bindings=kb_final,
         mouse_support=True,
         full_screen=False,
         style=app_style,
     )
+
+    if animate_in:
+        async def _animate_in():
+            nonlocal visible_count, selected_index
+            for i in range(1, len(option_list) + 1):
+                visible_count = i
+                if selected_index >= visible_count:
+                    selected_index = visible_count - 1
+                get_app().invalidate()
+                await asyncio.sleep(0.03)
+        app.pre_run_callables.append(lambda: app.create_background_task(_animate_in()))
+
     result = app.run()
     if result is None:
-        sel = radio._selected_index or 0
+        sel = selected_index or 0
         result = option_list[sel][0]
     return result
 
@@ -729,7 +806,7 @@ def pre_main() -> bool:
         set_env_variable("ATB_PATH", this_path)
         os.environ["ATB_PATH"] = this_path  # keep current process in sync
         path_updated = True  # trigger refresh once
- #       print_formatted_text(HTML(info + "检查系统变量[PATH]..."), style=style)#Test do not remove
+        print_formatted_text(HTML(info + "设置环境变量[PATH]..."), style=style)#Test do not remove
     with open("whoyou.txt", "w", encoding="utf-8") as f:
         f.write("2")
 
