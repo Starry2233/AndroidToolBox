@@ -28,11 +28,6 @@ def main():
                    for data in response.iter_content(chunk_size=1024):
                        bj.write(data)
                        bar.update(len(data))
-            md5f = filehash.FileHash("md5").hash_file("bugjump.7z")
-            if md5f != md5:
-                print("校验失败")
-                os.system("pause")
-                sys.exit(1)
             print("下载完成，开始解压...", end="")
             with py7zr.SevenZipFile("bugjump.7z", mode="r") as a:
                 a.extractall(path=".\\")

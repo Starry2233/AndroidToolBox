@@ -108,6 +108,8 @@ def run_step(cmd, bar, **kwargs):
         tqdm.write(line.rstrip())
     p.wait()
     bar.update(1)
+    if p.returncode != 0:
+        raise RuntimeError(f"Command failed (exit {p.returncode}): {' '.join(map(str, cmd))}")
 
 
 def main(python_builder: int, profile: int):
@@ -332,9 +334,39 @@ def main(python_builder: int, profile: int):
             os.makedirs(os.path.dirname(dst_path), exist_ok=True)
             shutil.copy2(src_path, dst_path)
 
-    shutil.copy2("./build/py/dist/run_cmd.exe", "./build/main/bin/run_cmd.exe")
-    shutil.copy2("./build/py/dist/start.exe", "./build/main/bin/main.exe")
-    shutil.copy2("./build/py/dist/repair.exe", "./build/main/bin/repair.exe")
+    def find_py_output(names):
+        dist = "./build/py/dist"
+        for n in names:
+            candidate = os.path.join(dist, f"{n}.exe")
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    required = {
+        "run_cmd": ["run_cmd"],
+        "start": ["main", "start"],
+        "repair": ["repair"],
+    }
+
+    missing = []
+    outputs = {}
+    for key, names in required.items():
+        found = find_py_output(names)
+        if found:
+            outputs[key] = found
+        else:
+            missing.append(f"{key} ({' / '.join(names)})")
+
+    if missing:
+        print("Missing built executables:")
+        for m in missing:
+            print(f" - {m}")
+        print("PyInstaller/Nuitka likely failed earlier. Check build output above.")
+        return 1
+
+    shutil.copy2(outputs["run_cmd"], "./build/main/bin/run_cmd.exe")
+    shutil.copy2(outputs["start"], "./build/main/bin/main.exe")
+    shutil.copy2(outputs["repair"], "./build/main/bin/repair.exe")
 
     rust_out = "./build/rust/release" if profile == 0 else "./build/rust/debug"
     rust_bins = {
