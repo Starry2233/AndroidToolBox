@@ -12,7 +12,21 @@ def main():
         vcf = open(".\\bin\\version.txt")
         vc = vcf.read().strip()
         vcf.close()
-        webv = requests.get(f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'})
+        channel = os.getenv("ATB_SYS_Channel", "").lower()
+        if channel == "1":
+            manifest_url = f"https://atb.xgj.qzz.io/other/rel/bugup/{vc}/manifest.json"
+        elif channel == "beta":
+            manifest_url = f"https://atb.xgj.qzz.io/other/beta/bugup/{vc}/manifest.json"
+        else:
+            manifest_url = f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json"
+
+        webv = requests.get(
+            manifest_url,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'},
+            timeout=20,
+            verify=True,
+        )
+        webv.raise_for_status()
         webvc = webv.json()["latestBugUpdate"]["ver"]
         filev = int(fv.read().strip())
         if webvc > filev:
@@ -21,7 +35,8 @@ def main():
             print("开始", end="\n")
             url = webv.json()["latestBugUpdate"]["url"]
             md5 = webv.json()["latestBugUpdate"]["md5"]
-            response = requests.get(url, stream=True)
+            response = requests.get(url, stream=True, timeout=30, verify=True)
+            response.raise_for_status()
             size = int(response.headers.get("content-length", 0))
             with tqdm.tqdm(total=size, unit="B", unit_scale=True, desc="bugjump.7z") as bar:
                with open("bugjump.7z", "wb") as bj:

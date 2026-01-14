@@ -517,6 +517,7 @@ def debug():
             ("3", "调整为使用状态"),
             ("4", "调整为更新状态"),
             ("5", "debug sel"),
+            ("6", "切换更新通道(ATB_SYS_Channel)"),
         ],
         default="A"
     )
@@ -533,6 +534,13 @@ def debug():
             open("whoyou.txt", "w").write("3")
         case "5":
             sel()
+        case "6":
+            current = (os.getenv("ATB_SYS_Channel") or "").lower()
+            new_val = "beta" if current != "beta" else "1"
+            set_env_variable("ATB_SYS_Channel", new_val)
+            os.environ["ATB_SYS_Channel"] = new_val
+            print_formatted_text(HTML(info + f"已切换更新通道为: {new_val}"), style=style)
+            time.sleep(1)
     debug()
 
 def sel():
@@ -825,6 +833,7 @@ def pre_main() -> bool:
         os.environ["ATB_PATH"] = this_path  # keep current process in sync
         path_updated = True  # trigger refresh once
         print_formatted_text(HTML(info + "设置环境变量[PATH]..."), style=style)#Test do not remove
+        set_env_variable("ATB_SYS_Channel", "1")
     with open("whoyou.txt", "w", encoding="utf-8") as f:
         f.write("2")
 
@@ -872,7 +881,15 @@ def pre_main() -> bool:
                 vcf = open("version.txt")
                 vc = vcf.read().strip()
                 vcf.close()
-                webv = requests.get(f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json", headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'})
+                channel = os.getenv("ATB_SYS_Channel", "").lower()
+                if channel == "1":
+                    manifest_url = f"https://atb.xgj.qzz.io/other/rel/bugup/{vc}/manifest.json"
+                elif channel == "beta":
+                    manifest_url = f"https://atb.xgj.qzz.io/other/beta/bugup/{vc}/manifest.json"
+                else:
+                    manifest_url = f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json"
+
+                webv = requests.get(manifest_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'})
                 webv = webv.json()["latestBugUpdate"]["ver"]
                 filev = int(fv.read().strip())
                 if webv > filev:
