@@ -335,7 +335,6 @@ def menu() -> str:
         options=[
             ("onekeyroot", "一键Root"),
             ("openshell", "在此处打开cmd[含adb环境]"),
-            ("forceupdate", "强制更新脚本"),
             ("about", "关于脚本"),
             ("mods", "扩展管理"),
             ("flash-files", "刷机与文件[子菜单]"),
@@ -552,7 +551,7 @@ def debug():
                 return debug()
 
             try:
-                proc = subprocess.run([check_path], capture_output=True, text=True)
+                proc = subprocess.run([check_path])  # allow interactive input/output
             except Exception as exc:
                 print_formatted_text(HTML(error + f"运行check.exe失败: {exc}"), style=style)
                 time.sleep(1)
@@ -565,8 +564,7 @@ def debug():
                 os.environ["ATB_SYS_Channel"] = new_val
                 print_formatted_text(HTML(info + f"已切换更新通道为: {new_val}"), style=style)
             else:
-                msg = proc.stdout.strip() if proc.stdout else "验证失败"
-                print_formatted_text(HTML(error + f"验证未通过，未切换: {msg}"), style=style)
+                print_formatted_text(HTML(error + f"验证未通过，未切换 (code {proc.returncode})"), style=style)
             time.sleep(1)
     debug()
 
@@ -784,9 +782,6 @@ def pre_main() -> bool:
     global flag
     run("@echo off")
     run("setlocal enabledelayedexpansion")
-    if os.getenv("ATB_OLD_MENU", "0") == "1":
-        run("call start.bat")
-        sys.exit()
     # subprocess.run(["chcp", "65001"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print_formatted_text(HTML(info + "正在启动中..."), style=style)
     colorama.init(autoreset=True)
@@ -861,8 +856,8 @@ def pre_main() -> bool:
         path_updated = True  # trigger refresh once
         print_formatted_text(HTML(info + "设置环境变量[PATH]..."), style=style)#Test do not remove
         set_env_variable("ATB_SYS_Channel", "1")
-    with open("whoyou.txt", "w", encoding="utf-8") as f:
-        f.write("2")
+        with open("whoyou.txt", "w", encoding="utf-8") as f:
+            f.write("2")
 
     if path_updated:
         run("call refreshenv 1>nul 2>nul")
@@ -1025,15 +1020,11 @@ def main() -> int:
         run("call logo")
         result = menu()
         match result:
-            case "SHIFT_R":
-                clear(); run("call start.bat"); return 0
             case "SHIFT_D": debug()
             case "onekeyroot":
                 clear(); run("call root.bat")
             case "openshell":
                 clear(); subprocess.run(["cmd.exe", "/k"], shell=True)
-            case "forceupdate":
-                clear(); run("start cmd /c upall.bat up"); return 0
             case "about": about()
             case "mods": mod()
             case "flash-files": flash()
