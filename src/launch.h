@@ -11,9 +11,11 @@
 #include <iostream>
 #include <stdlib.h>
 #include <string>
+#ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
 #include <tchar.h>
+#endif
 
 BOOL IsRunAsAdmin();
 void Message();
