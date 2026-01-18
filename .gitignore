@@ -33,3 +33,4 @@ source/
 /build.obj
 *.obj
 *.o
+/FileDialog/obj
