@@ -1,40 +1,68 @@
 # -*- coding: utf-8 -*-
 
+import logging
 import os
 import sys
 import shutil
 import platform
 import time
-from typing import Optional, Tuple
+import datetime
+import asyncio
+from typing import Optional, Tuple, Iterable, List
 from prompt_toolkit import (
-    choice, 
     print_formatted_text, 
     ANSI, 
     HTML, 
     prompt,
     PromptSession
 )
-from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.shortcuts import clear, set_title
-from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.application import Application
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.mouse_events import MouseEventType, MouseButton
 import colorama
 import subprocess
 import socket
+import requests
+import filehash
+import json
+import traceback
+import winreg
+
+try:
+    import debughook
+except ImportError:
+    pass
+
+
+class MultilineFormatter(logging.Formatter):
+    def format(self, record):
+        original = super().format(record)
+        lines = original.splitlines()
+        if len(lines) <= 1:
+            return original
+        prefix = lines[0][:len(lines[0]) - len(record.getMessage())]
+        return '\n'.join([lines[0]] + [prefix + line for line in lines[1:]])
 
 style = Style.from_dict({
-    "yellow": "fg:yellow",
-    "red": "fg:red",
-    "orange": "fg:orange",
+    "yellow": "fg:#f1c40f",
+    "red": "fg:#ff7b7b",
+    "orange": "fg:#f4a261",
     "info": "fg:#3B78FF",
-    "black": "fg:black",
-    "cyan": "fg:cyan",
-    "green": "fg:green",
-    "blue": "fg:blue",
-    "magenta": "fg:magenta",
-    "white": "fg:white",
+    "black": "fg:#0c1118",
+    "cyan": "fg:#67e0c2",
+    "green": "fg:#7ad1a8",
+    "blue": "fg:#8ab4f8",
+    "magenta": "fg:#c7a0ff",
+    "white": "fg:#e6edf3",
     "reset": "",
     "number": "bold",
-    "selected-option": "underline bold",
+    "selected-option": "fg:#e6edf3 bold underline",
 })
 
 info = "<info>[信息]</info>"
@@ -43,11 +71,282 @@ warn = "<orange>[警告]</orange>"
 
 flag = False
 key = False
+started = False
 
 LINE = "-" * 68
+DEBUG = os.getenv("ATB_DEBUG_MODE", "0") == "1"
+
+logger = logging.getLogger()
+logger.setLevel(logging.DEBUG)
+logger.handlers.clear()
+os.makedirs("logs", exist_ok=True)
+filename = f"logs/atb_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+file_handler = logging.FileHandler(filename, encoding="utf-8")
+file_handler.setLevel(logging.DEBUG)
+formatter = MultilineFormatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 
+def page_transition(text: str = "", duration: float = 0.35) -> None:
+    """Simple console transition animation when switching pages."""
+    msg = text.strip() or "正在切换..."
+    frames = ["", ".", "..", "...", " ..", "  ."]
+    end_time = time.monotonic() + duration
+    width = len(msg) + 4
+    while time.monotonic() < end_time:
+        for frame in frames:
+            if time.monotonic() >= end_time:
+                break
+            sys.stdout.write(f"\r{msg}{frame:<3}")
+            sys.stdout.flush()
+            time.sleep(max(duration / (len(frames) * 2), 0.02))
+    sys.stdout.write("\r" + " " * width + "\r")
+    sys.stdout.flush()
 
+# session = subprocess.Popen(["cmd.exe"], shell=True)
+
+Option = Tuple[str, str]
+
+def onerror(fn):
+    def wrapper(*args, **kwargs):
+        global logger
+        global style
+        global error
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err_msg = traceback.format_exc()
+            logger.error(f"Error in {fn.__name__}: {e}")
+            logger.error(err_msg)
+            print_formatted_text(HTML(error + "抱歉，脚本遇到了未经捕获的异常，即将退出..."), style=style)
+            print_formatted_text(HTML(info + "错误详情已记录到 bin/logs 文件夹中，您可以将该文件发送给技术支持以获取帮助。"), style=style)
+            time.sleep(3)
+            cleanup(-1)
+    return wrapper
+
+
+class Option:
+    def __init__(self, value, label):
+        self.value = value
+        self.label = label
+
+def menu_choice(
+    message: str,
+    options: Iterable[tuple],
+    default: str | None = None,
+    style_override: Style | None = None,
+    extra_bindings: KeyBindings | None = None,
+):
+    option_list: List[tuple] = list(options)
+    if not option_list:
+        raise ValueError("menu_choice requires at least one option")
+
+    selected_index = 0
+    display_index = 0
+    animate_in = True
+    visible_count = 0 if animate_in else len(option_list)
+    move_task = None
+
+    if default is not None:
+        for idx, (value, _) in enumerate(option_list):
+            if value == default:
+                selected_index = idx
+                display_index = idx
+                break
+
+    kb = KeyBindings()
+
+    @kb.add("enter", eager=True)
+    @kb.add(" ", eager=True)
+    def _(event):
+        idx = selected_index or 0
+        event.app.exit(result=option_list[idx][0])
+
+    digit_buf = {"text": "", "t": 0.0}
+
+    def _select_by_number(event, digit: str) -> None:
+        now = time.monotonic()
+        if now - digit_buf["t"] > 0.2:
+            digit_buf["text"] = ""
+        digit_buf["text"] += digit
+        digit_buf["t"] = now
+        try:
+            idx = int(digit_buf["text"]) - 1
+        except ValueError:
+            return
+        if 0 <= idx < len(option_list):
+            _set_selection(idx, event.app)
+
+    for d in "0123456789":
+        @kb.add(d, eager=True)
+        def _(event, _d=d):
+            _select_by_number(event, _d)
+
+    def _clamp(idx: int) -> int:
+        count = len(option_list)
+        return max(0, min(count - 1, idx))
+
+    def _animate_move(target: int, app):
+        nonlocal display_index, move_task
+        if move_task and not move_task.done():
+            move_task.cancel()
+
+        async def _run():
+            nonlocal display_index
+            while display_index != target:
+                step = 1 if display_index < target else -1
+                display_index += step
+                app.invalidate()
+                await asyncio.sleep(0.02)
+            app.invalidate()
+
+        move_task = app.create_background_task(_run())
+
+    def _set_selection(idx: int, app):
+        nonlocal selected_index, display_index
+        selected_index = _clamp(idx)
+        _animate_move(selected_index, app)
+
+    @kb.add("up")
+    @kb.add("k")
+    def _(event):
+        _set_selection(selected_index - 1, event.app)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _(event):
+        _set_selection(selected_index + 1, event.app)
+
+    last_click = {"idx": None, "t": 0.0}
+
+    def mouse_handler(mouse_event):
+        nonlocal selected_index
+        # You can add MouseEventType.MOUSE_MOVE event type to allow mouse-move-select.
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return NotImplemented
+
+        y = mouse_event.position.y
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            return None
+        if 0 <= y < current_len:
+            _set_selection(y, get_app())
+
+        if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
+            now = time.monotonic()
+            idx = selected_index
+            if idx == last_click["idx"] and (now - last_click["t"]) <= 0.5:
+                value = option_list[idx][0]
+                get_app().exit(result=value)
+            last_click["idx"] = idx
+            last_click["t"] = now
+        return None
+
+    def render_lines():
+        fragments = []
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            current_len = 1
+        current_len = min(current_len, len(option_list))
+        sel = min(display_index, current_len - 1)
+
+        for idx, (_, label) in enumerate(option_list[:current_len]):
+            pointer = ">" if idx == sel else " "
+            prefix = f" {pointer} " if idx == sel else "   "
+            text = f"{prefix}{idx + 1}. {label}"
+            style_class = "class:radio-selected" if idx == sel else "class:radio"
+            fragments.append((style_class, text))
+            if idx != current_len - 1:
+                fragments.append(("", "\n"))
+        return fragments
+
+    class MenuControl(FormattedTextControl):
+        def __init__(self, render_fn, handler):
+            super().__init__(render_fn, focusable=True, show_cursor=False)
+            self._handler = handler
+
+        def mouse_handler(self, mouse_event):
+            return self._handler(mouse_event)
+
+    control = MenuControl(render_lines, mouse_handler)
+    window = Window(content=control, always_hide_cursor=True, dont_extend_width=True, dont_extend_height=True)
+
+    radio_style = Style.from_dict(
+        {
+            "radio-list": "",
+            "radio": "fg:#cbd6e2",
+            "radio-selected": "fg:#e6edf3 bold underline",
+            "radio-checked": "fg:#7ad1a8",
+            "radio-number": "fg:#9dcffb bold",
+        }
+    )
+
+    app_style = merge_styles([style_override, radio_style]) if style_override else radio_style
+
+    kb_final = merge_key_bindings([kb, extra_bindings]) if extra_bindings else kb
+
+    app = Application(
+        layout=Layout(window, focused_element=control),
+        key_bindings=kb_final,
+        mouse_support=True,
+        full_screen=False,
+        style=app_style,
+    )
+
+    if animate_in:
+        async def _animate_in():
+            nonlocal visible_count, selected_index
+            for i in range(1, len(option_list) + 1):
+                visible_count = i
+                if selected_index >= visible_count:
+                    selected_index = visible_count - 1
+                get_app().invalidate()
+                await asyncio.sleep(0.03)
+        app.pre_run_callables.append(lambda: app.create_background_task(_animate_in()))
+
+    result = app.run()
+    if result is None:
+        sel = selected_index or 0
+        result = option_list[sel][0]
+    return result
+
+
+def choose(message: str, options: Iterable[Option], default: str | None = None, extra_bindings: KeyBindings | None = None):
+    page_transition(message or "正在切换...")
+    return menu_choice(message=message, options=options, default=default, style_override=style, extra_bindings=extra_bindings)
+
+def set_env_variable(name, value, user=True):
+    """
+    设置环境变量（用户或系统）
+    user=True 设置到当前用户
+    user=False 设置到系统（需要管理员权限）
+    """
+    root = winreg.HKEY_CURRENT_USER if user else winreg.HKEY_LOCAL_MACHINE
+    path = r'Environment'
+    try:
+        registry_key = winreg.OpenKey(root, path, 0, winreg.KEY_SET_VALUE)
+    except FileNotFoundError:
+        registry_key = winreg.CreateKey(root, path)
+
+    winreg.SetValueEx(registry_key, name, 0, winreg.REG_SZ, value)
+    winreg.CloseKey(registry_key)
+
+
+@onerror
+def get_env_variable(name, user=True) -> Optional[str]:
+    """Read environment variable directly from registry to avoid stale process env."""
+    root = winreg.HKEY_CURRENT_USER if user else winreg.HKEY_LOCAL_MACHINE
+    path = r'Environment'
+    try:
+        registry_key = winreg.OpenKey(root, path, 0, winreg.KEY_READ)
+        value, _ = winreg.QueryValueEx(registry_key, name)
+        winreg.CloseKey(registry_key)
+        return value
+    except FileNotFoundError:
+        return None
+
+@onerror
 def menu() -> str:
     global style
     if os.path.exists("mod") and os.path.isdir("mod"):
@@ -78,38 +377,44 @@ def menu() -> str:
     #         "selected-option": "underline bold",
     #     }
     # )
-    
-    result = choice(
+    print_formatted_text(ANSI(colorama.Fore.RESET + colorama.Fore.BLUE + "鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能"))
+    result = choose(
         message="",
         options=[
             ("onekeyroot", "一键Root"),
             ("openshell", "在此处打开cmd[含adb环境]"),
-            ("forceupdate", "强制更新脚本"),
             ("about", "关于脚本"),
             ("mods", "扩展管理"),
-            ("flash-files", "刷机与文件[子菜单]"),
-            ("connection-debug", "连接与调试[子菜单]"),
+            ("commonly", "常用合集[子菜单]"),
+            ("help-links", "链接合集[子菜单]"),
             ("man-apps", "应用管理[子菜单]"),
-            ("imoo-services", "小天才服务[子菜单]"),
-            ("help-links", "帮助与链接[子菜单]"),
-            ("exit", "退出脚本")
+            ("magisk-mod", "magisk模块管理[子菜单]"),
+            ("user-debug", "开发合集[子菜单]"),
+            ("exit", "退出工具")
         ],
         default="onekeyroot",
-        style=style,
-        key_bindings=kb,
-        mouse_support=True
+        extra_bindings=kb
     )
 
     clear(); return result
 
 def run(cmd):
-    subprocess.run(["cmd.exe", "/c", f"@echo off && setlocal enabledelayedexpansion > nul && call .\\color.bat && set PATH=%PATH%;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;%cd%\\ && set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC; && {cmd} && endlocal"], shell=True)
+    subprocess.run(["cmd.exe", "/v:on", "/c", f'''
+                    @echo off &
+                    setlocal enabledelayedexpansion 1>nul 2>nul &
+                    call .\\color.bat &
+                    set PATH=%cd%\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;%PATH% &
+                    set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC; &
+                    @{cmd} &
+                    endlocal 1>nul 2>nul &
+                    '''.replace("\n", "").replace(20*" ", "")])
 
+@onerror
 def appset():
     global style
-    run("cls")
+    clear()
     run("call logo")
-    result = choice(
+    result = choose(
         message="应用管理菜单",
         #text="请选择",
         options=[
@@ -120,8 +425,7 @@ def appset():
             ("4", "设置微信QQ为开机自启应用"),
             ("5", "解除z10安装限制"),
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
     if result == "A":
         clear(); return
@@ -137,122 +441,124 @@ def appset():
         run("call z10openinst")
     appset()
 
-def control():
-    run("cls")
+@onerror
+def userdebug():
+    clear()
     run("call logo")
-    result = choice(
-        message="连接与调试菜单",
+    result = choose(
+        message="开发合集",
         #text="请选择",
         options=[
             ("A", "返回上级菜单"),
-            ("1", "进入qmmi[9008]"),
-            ("2", "scrcpy投屏"),
-            ("3", "手表信息"),
-            ("4", "打开充电可用"),
-            ("5", "型号与innermodel对照表"),
-            ("6", "高级重启"),
+            ("1", "手表信息"),
+            ("2", "打开充电可用"),
+            ("3", "型号与innermodel对照表"),
+            ("4", "导入本地root文件"),
+            ("5", "一键root[不刷userdata]"),
+            ("6", "恢复出厂设置[不是超级恢复]"),
+            ("7", "开机自刷Recovery"),
+            ("8", "强制加好友[已失效]"),
         ],
-        mouse_support=True
+        default="A"
     )
     if result == "A":
         clear(); return
     if result == "1":
-        run("call qmmi")
-    if result == "2":
-        run("start scrcpy-noconsole.vbs")
-    if result == "3":
         run("call listbuild")
-    if result == "4":
+    if result == "2":
         run("call opencharge")
-    if result == "5":
+    if result == "3":
         run("call innermodel")
+        print_formatted_text(HTML(info + "按任意键返回上级菜单"), style=style)
+        pause()
+    if result == "4":
+        run("call pashroot")
+    if result == "5":
+        run("call root nouserdata")
     if result == "6":
-        run("call rebootpro")
-    control()
+        run("call miscre")
+    if result == "7":
+        run("call pashtwrppro")
+    if result == "8":
+        run("call friend")
+    userdebug()
 
-def flash():
+@onerror
+def commonly():
     global style
-    run("cls")
+    clear()
     run("call logo")
-    result = choice(
-        message="刷机与文件菜单",
+    result = choose(
+        message="常用合集",
         #text="请选择",
         options=[
             ("A", "返回上级菜单"),
-            ("1", "从云端更新文件"),
-            ("2", "导入本地root文件"),
-            ("3", "一键root[不刷userdata]"),
-            ("4", "恢复出厂设置"),
-            ("5", "开机自刷Recovery"),
-            ("6", "刷入TWRP"),
-            ("7", "刷入XTC Patch"),
-            ("8", "刷入Magisk模块"),
-            ("9", "备份与恢复"),
-            ("10", "安卓8.1root后优化")
+            ("1", "ADB/自检校验码计算"),
+            ("2", "离线OTA升级"),
+            ("3", "刷入TWRP"),
+            ("4", "刷入XTC Patch"),
+            ("5", "备份与恢复"),
+            ("6", "安卓8.1root后优化"),
+            ("7", "进入qmmi[9008]"),
+            ("8", "scrcpy投屏"),
+            ("9", "高级重启"),
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
     match result:
         case "A":
             clear(); return
         case "1":
-            run("call cloud")
+            run("powershell -ExecutionPolicy Bypass -File zj.ps1")
         case "2":
-            run("call pashroot")
+            run("call ota")
         case "3":
-            run("call root nouserdata")
-        case "4":
-            run("call miscre")
-        case "5":
-            run("call pashtwrppro")
-        case "6":
             run("call pashtwrp")
-        case "7":
+        case "4":
             run("call xtcpatch")
-        case "8":
-            run("call userinstmodule")
-        case "9":
+        case "5":
             run("call backup")
-        case "10":
+        case "6":
             run("call rootpro")
+        case "7":
+            run("call qmmi")
+            print_formatted_text(HTML(info + "按任意键返回上级菜单"), style=style)
+            pause()
+        case "8":
+            run("call scrcpy-ui.bat")
+        case "9":
+            run("call rebootpro")
         case _:
             print_formatted_text(HTML(error + "输入错误，请重新输入"), style=style)
-        
-    flash()
+    commonly()
 
-def xtcservice():
+@onerror
+def magisk():
 
     global style
-    run("cls")
+    clear()
     run("call logo")
-    result = choice(
-        message="小天才服务菜单",
+    result = choose(
+        message="magisk模块管理",
         #text="请选择",
         options=[
             ("A", "返回上级菜单"),
-            ("1", "手表强加好友[已弃用]"),
-            ("2", "ADB/自检校验码计算"),
-            ("3", "离线OTA升级"),
+            ("1", "刷入Magisk模块"),
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
     if result == "A":
         clear(); return
     if result == "1":
-        run("call friend")
-    if result == "2":
-        run('powershell -ExecutionPolicy Bypass -File ".\\zj.ps1"')
-    if result == "3":
-        run("call ota")
-    xtcservice()
+        run("call userinstmodule")
+    magisk()
 
+@onerror
 def debug():
     global style
-    run("cls")
+    clear()
     run("call logo")
-    result = choice(
+    result = choose(
         message="DEBUG菜单",
         #text="请选择",
         options=[
@@ -262,9 +568,9 @@ def debug():
             ("3", "调整为使用状态"),
             ("4", "调整为更新状态"),
             ("5", "debug sel"),
+            ("6", "切换更新通道(ATB_SYS_Channel)"),
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
     match result:
         case "A":
@@ -279,17 +585,52 @@ def debug():
             open("whoyou.txt", "w").write("3")
         case "5":
             sel()
+        case "6":
+            def find_check_exe() -> str | None:
+                candidates = [
+                    "check.exe",
+                    os.path.join("..", "check.exe"),
+                ]
+                for p in candidates:
+                    if os.path.isfile(p):
+                        return p
+                return None
+
+            check_path = find_check_exe()
+            if not check_path:
+                print_formatted_text(HTML(error + "未找到check.exe，无法切换通道"), style=style)
+                time.sleep(1)
+                return debug()
+
+            try:
+                proc = subprocess.run([check_path])  # allow interactive input/output
+            except Exception as exc:
+                print_formatted_text(HTML(error + f"运行check.exe失败: {exc}"), style=style)
+                time.sleep(1)
+                return debug()
+
+            if proc.returncode == 1:
+                current = (os.getenv("ATB_SYS_Channel") or "").lower()
+                new_val = "beta" if current != "beta" else "1"
+                set_env_variable("ATB_SYS_Channel", new_val)
+                os.environ["ATB_SYS_Channel"] = new_val
+                print_formatted_text(HTML(info + f"已切换更新通道为: {new_val}"), style=style)
+            else:
+                print_formatted_text(HTML(error + f"验证未通过，未切换 (code {proc.returncode})"), style=style)
+            time.sleep(1)
     debug()
 
+@onerror
 def sel():
-    run("cls")
+    clear()
     run("call sel file s .")
     run("pause")
     run("call sel file m .")
     run("pause")
 
+@onerror
 def color():
-    run("cls")
+    clear()
     print_formatted_text(HTML(info +"<black>BLACK</black>"), style=style)
     print_formatted_text(HTML(info +"<red>RED</red>"), style=style)
     print_formatted_text(HTML(info +"<green>GREEN</green>"), style=style)
@@ -300,43 +641,41 @@ def color():
     print_formatted_text(HTML(info +"<white>WHITE</white>"), style=style)
     run("pause")
 
+
+@onerror
 def help_menu():
-    run("cls")
+    clear()
     run("call logo")
-    result = choice(
+    result = choose(
         message="帮助与链接",
         #text="请选择",
         options=[
             ("A", "返回上级菜单"),
-            ("1", "远程协助"),
-            ("2", "超级恢复文件下载"),
-            ("3", "离线OTA下载"),
-            ("4", "面具模块下载"),
-            ("5", "APK下载"),
-            ("6", "工具箱官网"),
-            ("7", "开发文档"),
-            ("8", "123云盘解除下载限制")
+            ("1", "超级恢复文件下载"),
+            ("2", "离线OTA下载"),
+            ("3", "面具模块下载"),
+            ("4", "APK下载"),
+            ("5", "工具箱官网"),
+            ("6", "开发文档"),
+            ("7", "123云盘解除下载限制")
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
     match result:
         case "A":
             clear()
             return
         case "1":
-            print_formatted_text(HTML(warn + "已弃用该功能"))
-        case "2":
             run("start https://www.123865.com/s/Q5JfTd-hEbWH")
-        case "3":
+        case "2":
             run("start https://www.123865.com/s/Q5JfTd-HEbWH")
-        case "4":
+        case "3":
             run("start https://www.123684.com/s/Q5JfTd-cEbWH")
-        case "5":
+        case "4":
             run("start https://www.123684.com/s/Q5JfTd-ZEbWH")
-        case "6":
+        case "5":
             run("start https://atb.xgj.qzz.io")
-        case "7":
+        case "6":
             with open("开发文档.txt", "r", encoding="utf-8") as f:
                 doc = f.read()
                 print_formatted_text(HTML(doc), style=style)
@@ -346,7 +685,7 @@ def help_menu():
                 key_bindings=kb,
                 style=style
             )
-        case "8":
+        case "7":
             run("call patch123")
         
     help_menu()
@@ -374,11 +713,10 @@ def load_mod_menu():
         mapping[key] = name
         options.append((key, name))
 
-    result = choice(
+    result = choose(
         message="已加载扩展",
         options=options,
-        style=style,
-        mouse_support=True
+        default="A"
     )
 
     if result == "A":
@@ -387,14 +725,16 @@ def load_mod_menu():
     return mapping.get(result)
 
 
+@onerror
 def run_mod_main(modname):
     run(f'cd /d mod\\{modname} && call main.bat')
 
+@onerror
 def mod():
-    run("cls")
+    clear()
     run("call logo")
 
-    result = choice(
+    result = choose(
         message="扩展管理",
         options=[
             ("A", "返回上级菜单"),
@@ -402,8 +742,7 @@ def mod():
             ("2", "安装扩展"),
             ("3", "卸载扩展"),
         ],
-        style=style,
-        mouse_support=True
+        default="A"
     )
 
     if result == "A":
@@ -422,7 +761,7 @@ def mod():
 
     mod()
 
-
+@onerror
 def about():
     print_formatted_text(
         HTML(f"<yellow>{LINE}</yellow>"),
@@ -473,6 +812,7 @@ def about():
         style=style
     )
 
+@onerror
 def checkwin() -> Tuple[str, str, str, str]:
     return (
         platform.system(),
@@ -494,17 +834,20 @@ def pause():
     PromptSession(key_bindings=kb).prompt("")
 
 
+@onerror
 def pre_main() -> bool:
     global flag
+    global logger
+    global DEBUG
     run("@echo off")
     run("setlocal enabledelayedexpansion")
-    if os.getenv("ATB_OLD_MENU", "0") == "1":
-        run("call start.bat")
-        sys.exit()
     # subprocess.run(["chcp", "65001"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print_formatted_text(HTML(info + "正在启动中..."), style=style)
+    # print_formatted_text(HTML(info + "正在启动中..."), style=style)
     colorama.init(autoreset=True)
     run("call .\\color.bat")
+    if DEBUG:
+        print_formatted_text(HTML(info + "已启用调试模式"), style=style)
+        logger.debug("Debug mode is enabled")
     if " " in os.path.abspath("."):
         if os.getenv("ATB_IGNORE_SPACE_IN_PATH", "0") != "1":
             print_formatted_text(HTML(error + "当前路径包含空格，会导致未知问题，请将工具箱放置在无空格路径下运行，即将退出..."), style=style)
@@ -513,8 +856,76 @@ def pre_main() -> bool:
             return False
         else:
             print_formatted_text(HTML(warn + "当前路径包含空格，可能导致未知问题，建议将工具箱放置在无空格路径下运行"), style=style)
+    if getattr(sys, 'frozen', False):
+        this_path = os.path.dirname(sys.executable)
+    else:
+        this_path = os.path.dirname(os.path.abspath(__file__))
+
+    def clean_env_value(val: Optional[str]) -> Optional[str]:
+        if not val:
+            return val
+        return val.strip().strip('"').strip().rstrip(';')
+
+    atb_path_env = clean_env_value(os.getenv("ATB_PATH"))
+    atb_path_reg = clean_env_value(get_env_variable("ATB_PATH"))
+    atb_path = atb_path_env or atb_path_reg
+    path_v = get_env_variable("PATH", True) or ""
+    path_updated = False
+
+    def norm_path(p: str) -> str:
+        return os.path.normcase(os.path.normpath(p.rstrip("\\/")))
+
+    if not atb_path:
+        with open("whoyou.txt", "w", encoding="utf-8") as f:
+            f.write("1")
+
+    # Clean and drop empty entries from PATH for stable comparisons
+    path_parts = [clean_env_value(p.strip()) for p in path_v.split(";") if p.strip()]
+    path_parts = [p for p in path_parts if p]
+    this_norm = norm_path(this_path)
+    atb_norm = norm_path(atb_path) if atb_path else None
+
+    # Normalize PATH: drop old ATB entry, remove dupes, ensure current path is present
+    cleaned_parts = []
+    seen = set()
+    for p in path_parts:
+        norm = norm_path(p)
+        if atb_norm and norm == atb_norm and this_norm != atb_norm:
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        cleaned_parts.append(os.path.normpath(p))
+
+    # Ensure current path is present exactly once
+    if this_norm not in seen:
+        cleaned_parts.insert(0, os.path.normpath(this_path))
+        seen.add(this_norm)
+
+    new_path = ";".join(cleaned_parts)
+    normed_current = [norm_path(p) for p in path_parts]
+    normed_new = [norm_path(p) for p in cleaned_parts]
+
+    # Only update PATH when normalized lists differ
+    if normed_new != normed_current:
+        set_env_variable("PATH", new_path)
+        path_updated = True
+
+    atb_same = bool(atb_path) and (atb_norm == this_norm)
+    if not atb_same:
+        set_env_variable("ATB_PATH", this_path)
+        os.environ["ATB_PATH"] = this_path  # keep current process in sync
+        path_updated = True  # trigger refresh once
+        print_formatted_text(HTML(info + "设置环境变量[PATH]..."), style=style)#Test do not remove
+        set_env_variable("ATB_SYS_Channel", "1")
+        with open("whoyou.txt", "w", encoding="utf-8") as f:
+            f.write("2")
+
+    if path_updated:
+        run("call refreshenv 1>nul 2>nul")
     print_formatted_text(HTML(info + "检查系统变量[PATH]..."), style=style)
     run("set PATH=%PATH%;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;%cd%\\")
+    
     print_formatted_text(HTML(info + "检查系统变量[PATHEXT]..."), style=style)
     run("set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;")
     set_title("XTC AllToolBox by xgj_236")
@@ -526,6 +937,7 @@ def pre_main() -> bool:
                 run(f'cd /d mod\\{item} && call start.bat')
 
     os.chdir("..\\bin")
+    # tip: 已停止对WMIC的支持
     # wmic = subprocess.run(["cmd.exe", "/c", "where", "wmic.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
 
     # if wmic.returncode != 0:
@@ -540,8 +952,42 @@ def pre_main() -> bool:
         
     run("call withone")
     run("call afterup")
+    if os.path.exists("..\\bugjump.7z"): os.remove("..\\bugjump.7z")
+    if os.path.exists("..\\repair.exe"): os.remove("..\\repair.exe")
     if os.getenv("ATB_SKIP_UPDATE", "0") != "1":
         print_formatted_text(HTML(info + "正在检查更新..."), style=style)
+        try:
+            if not os.path.exists("bugversion.txt"): 
+                bv = open("bugversion.txt", "w")
+                bv.write("0")
+                bv.close()
+            with open("bugversion.txt", "r") as fv:
+                vcf = open("version.txt")
+                vc = vcf.read().strip()
+                vcf.close()
+                channel = os.getenv("ATB_SYS_Channel", "").lower()
+                if channel == "1":
+                    manifest_url = f"https://atb.xgj.qzz.io/other/rel/bugup/{vc}/manifest.json"
+                elif channel == "beta":
+                    manifest_url = f"https://atb.xgj.qzz.io/other/beta/bugup/{vc}/manifest.json"
+                else:
+                    manifest_url = f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json"
+
+                webv = requests.get(manifest_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'})
+                webv = webv.json()["latestBugUpdate"]["ver"]
+                filev = int(fv.read().strip())
+                if webv > filev:
+                    print_formatted_text(HTML(warn+"当前补丁版本过时，必须更新"), style=style)
+                    print_formatted_text(HTML(info+"按任意键开始更新..."), style=style)
+                    pause()
+                    shutil.copy2("repair.exe", "..\\repair.exe")
+                    os.chdir("..\\")
+                    subprocess.run(["cmd", "/c", "start", "repair.exe"])
+                    cleanup(2)
+        except Exception as e:
+            # Skip update on failure but continue startup
+            # print_formatted_text(HTML(warn + f"漏洞补丁获取失败，已跳过"), style=style)
+            pass
         run("call upall.bat run")
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
         print_formatted_text(HTML(info + "正在检查Windows属性..."), style=style)
@@ -601,7 +1047,7 @@ def check_adb_server() -> Tuple[bool, Optional[Exception]: None]:
     adb_server.close()
     return True
 
-
+@onerror
 def cleanup(code: int = 0):
     global style
     print_formatted_text(HTML(info + "正在结束ADB服务..."), style=style)
@@ -620,38 +1066,33 @@ def cleanup(code: int = 0):
         #     pass
 
 
-    run("endlocal")
     sys.exit(code)
 
-
+@onerror
 def main() -> int:
     # do
     global flag
     global key
     global style
     try:
-        clear()
 
         pre = pre_main() if not flag else True
         if not pre: return 1
+        clear()
         run("call logo")
         result = menu()
         match result:
-            case "SHIFT_R":
-                run("call start.bat"); return 0
             case "SHIFT_D": debug()
             case "onekeyroot":
-                run("call root.bat")
+                clear(); run("call root.bat"); clear()
             case "openshell":
-                subprocess.run(["cmd.exe", "/k"], shell=True)
-            case "forceupdate":
-                run("start cmd /c upall.bat up"); return 0
+                clear(); subprocess.run(["cmd.exe", "/k"], shell=True); clear()
             case "about": about()
             case "mods": mod()
-            case "flash-files": flash()
-            case "connection-debug": control()
+            case "commonly": commonly()
+            case "user-debug": userdebug()
             case "man-apps": appset()
-            case "imoo-services": xtcservice()
+            case "magisk-mod": magisk()
             case "help-links":  help_menu()
             case "exit": return 0
         return main() # loop
