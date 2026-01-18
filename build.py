@@ -147,6 +147,9 @@ def main(python_builder: int, profile: int, bmode: str, builder: int):
     print("Build script running...")
     print("Release build") if profile == 0 else print("Debug Build")
     os.environ["PYTHONUTF8"] = "1"
+    if not os.path.exists("./src/FileDialog/FileDialog.csproj"):
+        print("找不到 FileDialog.csproj， 请递归克隆仓库。git clone --recurse-submodules <repo_url>")
+        return 1
     upx_dir = find_upx_dir()
     if upx_dir:
         print(f"Using UPX at: {upx_dir}")
@@ -161,14 +164,30 @@ def main(python_builder: int, profile: int, bmode: str, builder: int):
             extra_bins.append(v)
     extra_bins.append(r"E:\mingw64\bin")
 
-    windres = resolve_tool(["windres.exe", "windres"], extra_bins)
-    gxx = resolve_tool(["g++.exe", "g++"], extra_bins)
-
+    windres = resolve_tool(["windres.exe", "windres"], extra_bins) if builder == 0 else True
+    gxx = resolve_tool(["g++.exe", "g++"], extra_bins) if builder == 0 else True
+    iconv = resolve_tool(["iconv.exe", "iconv"], extra_bins) if builder == 0 else True
+    dotnet = resolve_tool(["dotnet.exe", "dotnet"], extra_bins)
+    cargo = resolve_tool(["cargo.exe", "cargo"], extra_bins)
+    cl = resolve_tool(["cl.exe", "cl"], extra_bins) if builder == 1 else True
+    rc = resolve_tool(["rc.exe", "rc"], extra_bins) if builder == 1 else True
     missing = []
-    if not windres:
-        missing.append("windres.exe (MinGW bin)")
-    if not gxx:
-        missing.append("g++.exe (MinGW GCC)")
+    if builder == 0 or bmode == "mingw":
+        if not windres:
+            missing.append("windres.exe (MinGW bin)")
+        if not gxx:
+            missing.append("g++.exe (MinGW GCC)")
+        if not iconv:
+            print("Warning: iconv.exe (MinGW/Extra bin) not found. This may cause encoding issues.")
+    if builder == 1 or bmode == "msvc":
+        if not cl:
+            missing.append("cl.exe (MSVC toolchain)")
+        if not rc:
+            missing.append("rc.exe (Windows SDK)")
+    if not cargo:
+        missing.append("cargo.exe (Rust toolchain)")
+    if not dotnet:
+        missing.append("dotnet.exe (.NET SDK)")
 
     if missing:
         print("Missing required tools:")
@@ -373,6 +392,15 @@ def main(python_builder: int, profile: int, bmode: str, builder: int):
             shell=True
         )
 
+        bar.set_description("Building FileDialog")
+        run_step(
+            ["dotnet.exe", "build", "./src/FileDialog/FileDialog.csproj", "-c", "Release", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
+            bar
+        ) if profile == 0 else run_step(
+            ["dotnet.exe", "build", "./src/FileDialog/FileDialog.csproj", "-c", "Debug", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
+            bar
+        )
+
         bar.set_description("Extracting Binaries")
         with py7zr.SevenZipFile('bin.7z', mode='r') as z:
             z.extractall(path='./build/main/bin')
@@ -421,9 +449,13 @@ def main(python_builder: int, profile: int, bmode: str, builder: int):
     shutil.copy2(outputs["run_cmd"], "./build/main/bin/run_cmd.exe")
     shutil.copy2(outputs["start"], "./build/main/bin/main.exe")
     shutil.copy2(outputs["repair"], "./build/main/bin/repair.exe")
+    shutil.copy2("./build/FileDialog/FileDialog.exe", "./build/main/bin/FileDialog.exe")
+    shutil.copy2("./build/FileDialog/FileDialog.exe.config", "./build/main/bin/FileDialog.exe.config")
+
     
 
     if profile == 1:
+        shutil.copy2("./build/FileDialog/FileDialog.pdb", "./build/main/bin/FileDialog.pdb")
         if bmode == "msvc":
             try:
                 shutil.copy2("build/py/dist/run_cmd.pdb", "./build/main/bin/run_cmd.pdb")

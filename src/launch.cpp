@@ -2,6 +2,7 @@
 
 const std::wstring RUN_BAT_CMD = L"main.exe";
 
+#ifdef _WIN32
 BOOL IsRunAsAdmin()
 {
     BOOL isAdmin = FALSE;
@@ -20,6 +21,7 @@ BOOL IsRunAsAdmin()
 
     return isAdmin;
 }
+#endif
 
 void Message()
 {
