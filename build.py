@@ -525,7 +525,7 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
                 bar.set_description("run_cmd.py -> run_cmd.exe")
                 run_step(
                     [python_exe, "-m", "nuitka",
-                    "--onefile", "--lto=yes", "--output-dir=./build/py/dist"
+                    "--onefile", "--lto=yes", "--output-dir=./build/py/dist",
                     "src/run_cmd.py", "--mingw" if bmode == "mingw" else "--msvc=latest", "--nofollow-import-to=debughook"],
                     bar
                 )
