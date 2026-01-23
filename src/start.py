@@ -421,7 +421,6 @@ def run(cmd):
                     @echo off &
                     setlocal enabledelayedexpansion 1>nul 2>nul &
                     call .\\color.bat &
-                    set PATH=%cd%\\;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;%PATH% &
                     set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC; &
                     @{cmd} &
                     endlocal 1>nul 2>nul &
@@ -942,7 +941,7 @@ def pre_main() -> bool:
     if path_updated:
         run("call refreshenv 1>nul 2>nul")
     print_formatted_text(HTML(info + "检查系统变量[PATH]..."), style=style)
-    run("set PATH=%PATH%;C:\\Windows\\system32;C:\\Windows;C:\\Windows\\System32\\Wbem;C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\;C:\\Windows\\System32\\OpenSSH\\;%cd%\\")
+    # PATH 已在上方规范化并写入环境变量，避免重复追加
     
     print_formatted_text(HTML(info + "检查系统变量[PATHEXT]..."), style=style)
     run("set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;")

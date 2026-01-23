@@ -4,12 +4,13 @@ Menu utilities extracted from start.py for reuse by Python and batch callers.
 Provides interactive menu rendering plus config-driven action resolution via XML.
 """
 from __future__ import annotations
-
+print("正在加载...")
 import asyncio
 import time
 import os
 import json
 import xml.etree.ElementTree as ET
+import sys
 from typing import Iterable, List, Tuple
 
 from prompt_toolkit import HTML, prompt
@@ -282,15 +283,34 @@ def choose_action(options: List[Tuple[str, str]] | None = None, message: str = "
 
 
 if __name__ == "__main__":
-    # 允许批处理/双击调用: 可传入参数指定XML菜单配置文件，否则用环境变量或默认 menu_options.xml
+    # 只接受命令行参数提供XML菜单配置文件
     import sys
-
-    arg_xml = sys.argv[1] if len(sys.argv) > 1 else None
-    xml_path = arg_xml or os.getenv("ATB_MENU_OPTIONS_XML") or os.path.join(os.getcwd(), "menu_options.xml")
-
+    
+    if len(sys.argv) != 2:
+        # 改为在屏幕上显示错误信息
+        print("[错误]请提供XML配置文件的路径作为命令行参数")
+        sys.exit(1)
+    
+    xml_path = sys.argv[1]
+    
+    if not os.path.isfile(xml_path):
+        # 改为在屏幕上显示错误信息
+        print(f"[错误]找不到文件 '{xml_path}'")
+        sys.exit(1)
+    
     loaded = load_options_from_xml(xml_path)
     if not loaded:
-        print("未找到菜单项，请提供有效的XML配置")
+        # 改为在屏幕上显示错误信息
+        print("[错误]XML文件中没有找到有效的菜单项")
         sys.exit(1)
-    selection = choose_action(loaded)
-    print(selection)
+    
+    try:
+        selection = choose_action(loaded)
+    except Exception as e:
+        # 捕获其他可能的错误并在屏幕上显示
+        print(f"[错误]菜单选择时发生错误: {str(e)}")
+        sys.exit(1)
+    
+    # 将选择结果写入文件
+    with open("menutmp.txt", "w", encoding="utf-8") as f:
+        f.write(selection)
