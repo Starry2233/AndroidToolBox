@@ -4,7 +4,7 @@ import sys
 import win32com.client
 
 # 自定义密钥（重要！请修改为自己的密钥，防止他人破解）
-SECRET_KEY = "YourCustomSecretKey123"  # 建议替换为随机字符串
+SECRET_KEY = "Starry2333"  # 建议替换为随机字符串
 
 def get_cpu_id():
     """获取CPU序列号"""

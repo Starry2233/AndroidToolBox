@@ -9,6 +9,8 @@ import py7zr
 import shutil
 import argparse
 import colorama
+import time
+from datetime import datetime, timezone, timedelta
 from tqdm import tqdm
 
 
@@ -101,6 +103,42 @@ def resolve_tool(candidates, extra_dirs=None):
     return None
 
 
+def _require_value(name: str, provided: str | None, default: str | None = None) -> str:
+    """Return provided value, default, or prompt the user until non-empty."""
+    if provided is not None and str(provided).strip() != "":
+        return str(provided).strip()
+    if default is not None:
+        return default
+    while True:
+        val = input(f"请输入 {name}: ").strip()
+        if val:
+            return val
+        print("值不能为空，请重新输入。")
+
+
+def collect_build_metadata(meta_inputs: dict[str, str | None]) -> dict[str, str]:
+    """Gather build metadata values with defaults and interactive prompts."""
+    tz_cst = timezone(timedelta(hours=8), name="CST")
+    now_cst = datetime.now(tz_cst)
+    system_date_default = now_cst.strftime("%a %b %d %H:%M:%S %Z %Y")
+    utc_epoch_default = str(int(time.time()))
+
+    ro_build_type = _require_value("ro.build.type", meta_inputs.get("ro.build.type"))
+    metadata = {
+        "ro.system.build.date": _require_value("ro.system.build.date", meta_inputs.get("ro.system.build.date"), system_date_default),
+        "ro.build.type": ro_build_type,
+        "ro.system.build.type": _require_value("ro.system.build.type", meta_inputs.get("ro.system.build.type")),
+        "ro.build.version": _require_value("ro.build.version", meta_inputs.get("ro.build.version")),
+        "ro.build.date.utc": _require_value("ro.build.date.utc", meta_inputs.get("ro.build.date.utc"), utc_epoch_default),
+        "ro.product.current.softversion": _require_value("ro.product.current.softversion", meta_inputs.get("ro.product.current.softversion")),
+        "ro.product.commit": _require_value("ro.product.commit", meta_inputs.get("ro.product.commit")),
+        "ro.system.build.tags": _require_value("ro.system.build.tags", meta_inputs.get("ro.system.build.tags")),
+        "ro.product.locale": _require_value("ro.product.locale", meta_inputs.get("ro.product.locale")),
+        "ro.build.user": _require_value("ro.build.user", meta_inputs.get("ro.build.user")),
+    }
+    return metadata
+
+
 @onerror
 def download_dependency():
     url = ""
@@ -157,7 +195,7 @@ def run_step(cmd, bar, **kwargs):
 
 
 @onerror
-def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir: str | None, winsdk_include: str | None, mingw_bin_override: str | None, msvc_bin_override: str | None, msvc_include_override: str | None):
+def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir: str | None, winsdk_include: str | None, mingw_bin_override: str | None, msvc_bin_override: str | None, msvc_include_override: str | None, meta_inputs: dict[str, str | None]):
     print("Build script running...")
     print("Release build") if profile == 0 else print("Debug Build")
     os.environ["PYTHONUTF8"] = "1"
@@ -421,7 +459,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
         "windres",
         "g++",
         "pip",
-        "nuitka run_cmd",
         "nuitka repair",
         "nuitka start",
         "nuitka check",
@@ -533,14 +570,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
                 os.makedirs(nuitka_gcc, exist_ok=True)
                 os.symlink(gcc, nuitka_gcc + r"\bin")
             if profile == 0:
-                bar.set_description("run_cmd.py -> run_cmd.exe")
-                run_step(
-                    [python_exe, "-m", "nuitka",
-                    "--onefile", "--lto=yes", "--output-dir=./build/py/dist",
-                    "src/run_cmd.py", "--mingw" if bmode == "mingw" else "--msvc=latest", "--nofollow-import-to=debughook"],
-                    bar
-                )
-
                 bar.set_description("repair.py -> repair.exe")
                 run_step(
                     [python_exe, "-m", "nuitka",
@@ -573,14 +602,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
                     bar
                 )
             else:
-                bar.set_description("run_cmd.py -> run_cmd.exe")
-                run_step(
-                    [python_exe, "-m", "nuitka",
-                    "--onefile", "--lto=no", "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
-                    "src/run_cmd.py", "--mingw" if bmode == "mingw" else "--msvc=latest", "--include-module=debughook"],
-                    bar
-                )
-
                 bar.set_description("repair.py -> repair.exe")
                 run_step(
                     [python_exe, "-m", "nuitka",
@@ -614,12 +635,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
                 )
         else:
             if profile == 0:
-                bar.set_description("run_cmd.py -> run_cmd.exe")
-                run_step(
-                    pyinstaller_cmd(python_exe, "src/run_cmd.py", "./build/py/dist", debug=False, upx_dir=upx_dir),
-                    bar
-                )
-
                 bar.set_description("repair.py -> repair.exe")
                 run_step(
                     pyinstaller_cmd(python_exe, "src/repair.py", "./build/py/dist", debug=False, upx_dir=upx_dir),
@@ -644,12 +659,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
                     bar
                 )
             else:
-                bar.set_description("run_cmd.py -> run_cmd.exe")
-                run_step(
-                    pyinstaller_cmd(python_exe, "src/run_cmd.py", "./build/py/dist", debug=True, upx_dir=upx_dir),
-                    bar
-                )
-
                 bar.set_description("repair.py -> repair.exe")
                 run_step(
                     pyinstaller_cmd(python_exe, "src/repair.py", "./build/py/dist", debug=True, upx_dir=upx_dir),
@@ -718,7 +727,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
         return None
 
     required = {
-        "run_cmd": ["run_cmd"],
         "start": ["main", "start"],
         "repair": ["repair"],
         "check": ["check"],
@@ -741,7 +749,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
         print("PyInstaller/Nuitka likely failed earlier. Check build output above.")
         return 1
 
-    shutil.copy2(outputs["run_cmd"], "./build/main/bin/run_cmd.exe")
     shutil.copy2(outputs["start"], "./build/main/bin/main.exe")
     shutil.copy2(outputs["repair"], "./build/main/bin/repair.exe")
     shutil.copy2(outputs["check"], "./build/main/bin/check.exe")
@@ -755,7 +762,6 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
         shutil.copy2("./build/FileDialog/FileDialog.pdb", "./build/main/bin/FileDialog.pdb")
         if bmode == "msvc":
             try:
-                shutil.copy2("build/py/dist/run_cmd.pdb", "./build/main/bin/run_cmd.pdb")
                 shutil.copy2("build/py/dist/start.pdb", "./build/main/bin/main.pdb")
                 shutil.copy2("build/py/dist/repair.pdb", "./build/main/bin/repair.pdb")
             except Exception as e:
@@ -784,12 +790,40 @@ def main(python_builder: int, profile: int, bmode: str, builder: int, winsdk_dir
         else:
             print(f"Warning: Rust output not found: {src_path}")
 
+    metadata = collect_build_metadata(meta_inputs)
+    conf_dir = os.path.join("./build/main/bin", "conf")
+    os.makedirs(conf_dir, exist_ok=True)
+    conf_path = os.path.join(conf_dir, "build.conf")
+    conf_lines = [
+        f"ro.system.build.date={metadata['ro.system.build.date']}",
+        f"ro.build.type={metadata['ro.build.type']}",
+        f"ro.system.build.type={metadata['ro.system.build.type']}",
+        f"ro.build.version={metadata['ro.build.version']}",
+        f"ro.build.date.utc={metadata['ro.build.date.utc']}",
+        f"ro.build.type={metadata['ro.build.type']}",
+        f"ro.product.current.softversion={metadata['ro.product.current.softversion']}",
+        f"ro.product.commit={metadata['ro.product.commit']}",
+        f"ro.system.build.tags={metadata['ro.system.build.tags']}",
+        f"ro.product.locale={metadata['ro.product.locale']}",
+        f"ro.build.user={metadata['ro.build.user']}",
+    ]
+    with open(conf_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(conf_lines))
+    print(f"Build metadata written to {conf_path}")
+
     print("Build completed.")
     return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build ATB.")
+    parser = argparse.ArgumentParser(
+        description="Build ATB.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Metadata defaults: ro.system.build.date uses current CST time (e.g. Wed Dec 03 22:24:49 CST 2025); "
+            "ro.build.date.utc uses current UTC epoch seconds. Override via --ro-* flags or interactively when omitted."
+        ),
+    )
     parser.add_argument(
         "-t", "--type",
         choices=["release", "debug"],
@@ -853,6 +887,16 @@ if __name__ == "__main__":
         default=None,
         help="Override MSVC include directory (used to resolve std headers like stdarg.h)"
     )
+    parser.add_argument("--ro-build-type", type=str, default=None, help="Value for ro.build.type")
+    parser.add_argument("--ro-system-build-type", type=str, default=None, help="Value for ro.system.build.type")
+    parser.add_argument("--ro-build-version", type=str, default=None, help="Value for ro.build.version")
+    parser.add_argument("--ro-product-current-softversion", type=str, default=None, help="Value for ro.product.current.softversion")
+    parser.add_argument("--ro-product-commit", type=str, default=None, help="Value for ro.product.commit")
+    parser.add_argument("--ro-system-build-tags", type=str, default=None, help="Value for ro.system.build.tags")
+    parser.add_argument("--ro-product-locale", type=str, default=None, help="Value for ro.product.locale")
+    parser.add_argument("--ro-build-user", type=str, default=None, help="Value for ro.build.user")
+    parser.add_argument("--ro-system-build-date", type=str, default=None, help="Override ro.system.build.date (default: current CST time, e.g. Wed Dec 03 22:24:49 CST 2025)")
+    parser.add_argument("--ro-build-date-utc", type=str, default=None, help="Override ro.build.date.utc (default: current UTC epoch seconds)")
     colorama.init(autoreset=True)
     args = parser.parse_args()
     
@@ -869,4 +913,17 @@ if __name__ == "__main__":
     profile = 0 if args.type == "release" else 1
     bmode = args.nuitka if args.nuitka else "pyinstaller"
 
-    sys.exit(main(pybuilder, profile, bmode, builder, args.winsdk_dir, args.winsdk_include, args.mingw_bin, args.msvc_bin, args.msvc_include))
+    meta_inputs = {
+        "ro.system.build.date": args.ro_system_build_date,
+        "ro.build.type": args.ro_build_type,
+        "ro.system.build.type": args.ro_system_build_type,
+        "ro.build.version": args.ro_build_version,
+        "ro.build.date.utc": args.ro_build_date_utc,
+        "ro.product.current.softversion": args.ro_product_current_softversion,
+        "ro.product.commit": args.ro_product_commit,
+        "ro.system.build.tags": args.ro_system_build_tags,
+        "ro.product.locale": args.ro_product_locale,
+        "ro.build.user": args.ro_build_user,
+    }
+
+    sys.exit(main(pybuilder, profile, bmode, builder, args.winsdk_dir, args.winsdk_include, args.mingw_bin, args.msvc_bin, args.msvc_include, meta_inputs))
