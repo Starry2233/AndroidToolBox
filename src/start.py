@@ -34,6 +34,7 @@ import filehash
 import json
 import traceback
 import winreg
+from pathlib import Path
 
 try:
     import debughook
@@ -73,6 +74,9 @@ warn = "<orange>[警告]</orange>"
 flag = False
 key = False
 started = False
+BUILD_CONF_PATH: Path | None = None
+CURRENT_BUILD_META: dict[str, str] = {}
+ENV_HEADER_CLICK_COUNT = 0
 
 LINE = "-" * 68
 DEBUG = os.getenv("ATB_DEBUG_MODE", "0") == "1"
@@ -146,6 +150,92 @@ def parse_cli_args():
     return args
 
 
+def load_build_metadata() -> tuple[dict[str, str], bool, Path | None]:
+    """Load build metadata from conf/build.conf if present.
+
+    Returns (metadata, found_flag, conf_path).
+    """
+    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+    candidates = [
+        base_dir / "conf" / "build.conf",
+        base_dir.parent / "conf" / "build.conf",
+        base_dir / ".." / "bin" / "conf" / "build.conf",
+        Path.cwd() / "conf" / "build.conf",
+    ]
+    meta: dict[str, str] = {}
+    conf_path: Path | None = None
+    for cand in candidates:
+        if cand.is_file():
+            conf_path = cand
+            break
+    if not conf_path:
+        return meta, False, None
+    try:
+        with conf_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                meta[k.strip()] = v.strip()
+    except Exception:
+        return meta, False, conf_path
+    return meta, True, conf_path
+
+
+def warn_unknown_publisher(meta: dict[str, str]) -> None:
+    allowed = {"AHA", "XGJ236", "Starry2233"}
+    user_val = meta.get("ro.build.user")
+    if not user_val or user_val not in allowed:
+        print_formatted_text(HTML(warn + "你使用的未知发布者编译的AllToolBox，可能会有异常问题"), style=style)
+
+
+def write_build_metadata(conf_path: Path, meta: dict[str, str]) -> None:
+    keys_in_order = list(meta.keys())
+    with conf_path.open("w", encoding="utf-8") as f:
+        for k in keys_in_order:
+            f.write(f"{k}={meta[k]}\n")
+
+
+def toggle_environment(conf_path: Path, meta: dict[str, str]) -> str:
+    """Toggle between release and userdebug environment by updating build.conf."""
+    is_userdebug = (
+        meta.get("ro.build.type") == "userdebug" and
+        meta.get("ro.system.build.type") == "userdebug-key" and
+        meta.get("ro.system.build.tags") == "userdebug-key"
+    )
+
+    if is_userdebug:
+        meta["ro.build.type"] = "release"
+        meta["ro.system.build.type"] = "release-key"
+        meta["ro.system.build.tags"] = "release-key"
+        target = "release"
+    else:
+        meta["ro.build.type"] = "userdebug"
+        meta["ro.system.build.type"] = "userdebug-key"
+        meta["ro.system.build.tags"] = "userdebug-key"
+        target = "userdebug"
+
+    write_build_metadata(conf_path, meta)
+    return target
+
+
+def debug_features_allowed(meta: dict[str, str]) -> bool:
+    return (
+        (
+            meta.get("ro.build.type") == "debug" and
+            meta.get("ro.system.build.type") == "debug-key" and
+            meta.get("ro.system.build.tags") == "debug-key"
+        )
+        or
+        (
+            meta.get("ro.build.type") == "userdebug" and
+            meta.get("ro.system.build.type") == "userdebug-key" and
+            meta.get("ro.system.build.tags") == "userdebug-key"
+        )
+    )
+
+
 CLI_ARGS = parse_cli_args()
 
 
@@ -155,6 +245,8 @@ def menu_choice(
     default: str | None = None,
     style_override: Style | None = None,
     extra_bindings: KeyBindings | None = None,
+    header_text: str | None = None,
+    header_click_callback=None,
 ):
     option_list: List[tuple] = list(options)
     if not option_list:
@@ -165,6 +257,7 @@ def menu_choice(
     animate_in = True
     visible_count = 0 if animate_in else len(option_list)
     move_task = None
+    header_rows = 1 if header_text else 0
 
     if default is not None:
         for idx, (value, _) in enumerate(option_list):
@@ -245,6 +338,13 @@ def menu_choice(
             return NotImplemented
 
         y = mouse_event.position.y
+        if header_rows and y == 0:
+            if header_click_callback:
+                header_click_callback()
+            return None
+
+        if header_rows:
+            y -= header_rows
         current_len = visible_count if animate_in else len(option_list)
         if current_len == 0:
             return None
@@ -263,6 +363,10 @@ def menu_choice(
 
     def render_lines():
         fragments = []
+        if header_text:
+            fragments.append(("class:menu-header", header_text))
+            fragments.append(("", "\n"))
+
         current_len = visible_count if animate_in else len(option_list)
         if current_len == 0:
             current_len = 1
@@ -330,9 +434,17 @@ def menu_choice(
     return result
 
 
-def choose(message: str, options: Iterable[Option], default: str | None = None, extra_bindings: KeyBindings | None = None):
+def choose(message: str, options: Iterable[Option], default: str | None = None, extra_bindings: KeyBindings | None = None, header_text: str | None = None, header_click_callback=None):
     page_transition(message or "正在切换...")
-    return menu_choice(message=message, options=options, default=default, style_override=style, extra_bindings=extra_bindings)
+    return menu_choice(
+        message=message,
+        options=options,
+        default=default,
+        style_override=style,
+        extra_bindings=extra_bindings,
+        header_text=header_text,
+        header_click_callback=header_click_callback,
+    )
 
 def set_env_variable(name, value, user=True):
     """
@@ -367,6 +479,7 @@ def get_env_variable(name, user=True) -> Optional[str]:
 @onerror
 def menu() -> str:
     global style
+    global ENV_HEADER_CLICK_COUNT, BUILD_CONF_PATH, CURRENT_BUILD_META
     if os.path.exists("mod") and os.path.isdir("mod"):
         print_formatted_text(HTML(info + "已加载扩展列表："), style=style) if len(os.listdir("mod")) != 0 else print_formatted_text(HTML(info + "已加载扩展列表：未加载任何扩展"), style=style)
         if len(os.listdir("mod")) != 0:
@@ -388,7 +501,7 @@ def menu() -> str:
         event.app.exit(result="SHIFT_D")
 
 
-    print_formatted_text(ANSI(colorama.Fore.RESET + colorama.Fore.YELLOW + "XTC AllToolBox 控制台&主菜单 " + colorama.Fore.BLUE + "by xgj_236" + colorama.Fore.LIGHTYELLOW_EX))
+    
     # style = Style.from_dict(
     #     {
     #         "number": "bold",
@@ -396,6 +509,20 @@ def menu() -> str:
     #     }
     # )
     print_formatted_text(ANSI(colorama.Fore.RESET + colorama.Fore.BLUE + "鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能"))
+    def header_click():
+        global ENV_HEADER_CLICK_COUNT
+        ENV_HEADER_CLICK_COUNT += 1
+        if ENV_HEADER_CLICK_COUNT >= 10:
+            ENV_HEADER_CLICK_COUNT = 0
+            if not BUILD_CONF_PATH:
+                print_formatted_text(HTML(error + "未找到 build.conf，无法切换环境"), style=style)
+                return
+            try:
+                target_env = toggle_environment(BUILD_CONF_PATH, CURRENT_BUILD_META)
+                print_formatted_text(HTML(info + f"已切换环境为: {target_env}"), style=style)
+            except Exception as exc:
+                print_formatted_text(HTML(error + f"切换环境失败: {exc}"), style=style)
+
     result = choose(
         message="",
         options=[
@@ -411,7 +538,9 @@ def menu() -> str:
             ("exit", "退出工具")
         ],
         default="onekeyroot",
-        extra_bindings=kb
+        extra_bindings=kb,
+        header_text="XTC AllToolBox 控制台&主菜单",
+        header_click_callback=header_click,
     )
 
     clear(); return result
@@ -585,7 +714,7 @@ def debug():
             ("3", "调整为使用状态"),
             ("4", "调整为更新状态"),
             ("5", "debug sel"),
-            ("6", "切换更新通道(ATB_SYS_Channel)"),
+            ("6", "切换环境 (release/userdebug)"),
         ],
         default="A"
     )
@@ -603,37 +732,16 @@ def debug():
         case "5":
             sel()
         case "6":
-            def find_check_exe() -> str | None:
-                candidates = [
-                    "check.exe",
-                    os.path.join("..", "check.exe"),
-                ]
-                for p in candidates:
-                    if os.path.isfile(p):
-                        return p
-                return None
-
-            check_path = find_check_exe()
-            if not check_path:
-                print_formatted_text(HTML(error + "未找到check.exe，无法切换通道"), style=style)
+            global BUILD_CONF_PATH, CURRENT_BUILD_META
+            if not BUILD_CONF_PATH:
+                print_formatted_text(HTML(error + "未找到 build.conf，无法切换环境"), style=style)
                 time.sleep(1)
                 return debug()
-
             try:
-                proc = subprocess.run([check_path])  # allow interactive input/output
+                target_env = toggle_environment(BUILD_CONF_PATH, CURRENT_BUILD_META)
+                print_formatted_text(HTML(info + f"已切换环境为: {target_env}"), style=style)
             except Exception as exc:
-                print_formatted_text(HTML(error + f"运行check.exe失败: {exc}"), style=style)
-                time.sleep(1)
-                return debug()
-
-            if proc.returncode == 1:
-                current = (os.getenv("ATB_SYS_Channel") or "").lower()
-                new_val = "beta" if current != "beta" else "1"
-                set_env_variable("ATB_SYS_Channel", new_val)
-                os.environ["ATB_SYS_Channel"] = new_val
-                print_formatted_text(HTML(info + f"已切换更新通道为: {new_val}"), style=style)
-            else:
-                print_formatted_text(HTML(error + f"验证未通过，未切换 (code {proc.returncode})"), style=style)
+                print_formatted_text(HTML(error + f"切换环境失败: {exc}"), style=style)
             time.sleep(1)
     debug()
 
@@ -856,6 +964,7 @@ def pre_main() -> bool:
     global flag
     global logger
     global DEBUG
+    global BUILD_CONF_PATH, CURRENT_BUILD_META
     run("@echo off")
     run("setlocal enabledelayedexpansion")
     # subprocess.run(["chcp", "65001"], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -974,36 +1083,55 @@ def pre_main() -> bool:
     if os.getenv("ATB_SKIP_UPDATE", "0") != "1":
         print_formatted_text(HTML(info + "正在检查更新..."), style=style)
         try:
-            if not os.path.exists("bugversion.txt"): 
-                bv = open("bugversion.txt", "w")
-                bv.write("0")
-                bv.close()
-            with open("bugversion.txt", "r") as fv:
-                vcf = open("version.txt")
-                vc = vcf.read().strip()
-                vcf.close()
-                channel = os.getenv("ATB_SYS_Channel", "").lower()
-                if channel == "1":
-                    manifest_url = f"https://atb.xgj.qzz.io/other/rel/bugup/{vc}/manifest.json"
-                elif channel == "beta":
-                    manifest_url = f"https://atb.xgj.qzz.io/other/beta/bugup/{vc}/manifest.json"
-                else:
-                    manifest_url = f"https://atb.xgj.qzz.io/other/bugup/{vc}/manifest.json"
+            meta_update, meta_found_update, conf_path_update = load_build_metadata()
+            if meta_found_update:
+                BUILD_CONF_PATH = conf_path_update
+                CURRENT_BUILD_META = meta_update
+            is_userdebug = meta_update.get("ro.build.type") == "userdebug" or meta_update.get("ro.system.build.type") == "userdebug-key"
+            base = "https://raw.githubusercontent.com/xgj236/AllToolBox/main"
+            utc_url = f"{base}/utctmp.txt"
+            version_tmp_url = f"{base}/versiontmp.txt"
+            if is_userdebug:
+                utc_url = f"{base}/betautctmp.txt"
+                version_tmp_url = f"{base}/betaversiontmp.txt"
 
-                webv = requests.get(manifest_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'})
-                webv = webv.json()["latestBugUpdate"]["ver"]
-                filev = int(fv.read().strip())
-                if webv > filev:
-                    print_formatted_text(HTML(warn+"当前补丁版本过时，必须更新"), style=style)
-                    print_formatted_text(HTML(info+"按任意键开始更新..."), style=style)
-                    pause()
-                    shutil.copy2("repair.exe", "..\\repair.exe")
-                    os.chdir("..\\")
-                    subprocess.run(["cmd", "/c", "start", "repair.exe"])
-                    cleanup(2)
-        except Exception as e:
+            local_path = "bugversion.txt"
+            if not os.path.exists(local_path):
+                with open(local_path, "w") as bv:
+                    bv.write("0")
+
+            with open(local_path, "r") as fv:
+                try:
+                    filev = int(fv.read().strip())
+                except ValueError:
+                    filev = 0
+
+            resp = requests.get(utc_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}, timeout=8)
+            resp.raise_for_status()
+            try:
+                webv = int(resp.text.strip())
+            except ValueError:
+                webv = filev
+
+            if webv > filev:
+                new_version = ""
+                try:
+                    vt = requests.get(version_tmp_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'}, timeout=8)
+                    vt.raise_for_status()
+                    new_version = vt.text.strip()
+                except Exception:
+                    new_version = ""
+                print_formatted_text(HTML(warn+"当前补丁版本过时，必须更新"), style=style)
+                if new_version:
+                    print_formatted_text(HTML(info+f"最新补丁版本：{new_version}"), style=style)
+                print_formatted_text(HTML(info+"按任意键开始更新..."), style=style)
+                pause()
+                shutil.copy2("repair.exe", "..\\repair.exe")
+                os.chdir("..\\")
+                subprocess.run(["cmd", "/c", "start", "repair.exe"])
+                cleanup(2)
+        except Exception:
             # Skip update on failure but continue startup
-            # print_formatted_text(HTML(warn + f"漏洞补丁获取失败，已跳过"), style=style)
             pass
         run("call upall.bat run")
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
@@ -1091,7 +1219,17 @@ def main() -> int:
     global flag
     global key
     global style
+    global BUILD_CONF_PATH, CURRENT_BUILD_META
+    build_meta, meta_found, conf_path = load_build_metadata()
+    BUILD_CONF_PATH = conf_path
+    CURRENT_BUILD_META = build_meta
+    debug_allowed = debug_features_allowed(build_meta)
+    not_allowed_msg = "ATB not allow start (CLI or debug menu). Please ask ATB-Team"
     try:
+        if not meta_found:
+            logger.error("BUILD.CONF 丢失")
+            print_formatted_text(HTML(error + "脚本遇到严重问题，已停止运行"), style=style)
+            return 1
         def handle_action(action: str) -> None:
             match action:
                 case "root":
@@ -1110,6 +1248,9 @@ def main() -> int:
 
         # CLI interface has highest priority: run requested action first, with optional pre-checks.
         if CLI_ARGS.action:
+            if not debug_allowed:
+                print_formatted_text(HTML(error + not_allowed_msg), style=style)
+                return 1
             if not CLI_ARGS.skip_pre and not flag:
                 pre_ok = pre_main()
                 if not pre_ok:
@@ -1117,15 +1258,23 @@ def main() -> int:
             handle_action(CLI_ARGS.action)
             return 0
 
-        pre_ok = True if CLI_ARGS.skip_pre else (pre_main() if not flag else True)
+        if CLI_ARGS.skip_pre and not debug_allowed:
+            print_formatted_text(HTML(warn + not_allowed_msg), style=style)
+
+        pre_ok = True if (CLI_ARGS.skip_pre and debug_allowed) else (pre_main() if not flag else True)
         if not pre_ok:
             return 1
         clear()
         run("call logo")
+        warn_unknown_publisher(build_meta)
 
         result = menu()
         match result:
-            case "SHIFT_D": debug()
+            case "SHIFT_D":
+                if debug_allowed:
+                    debug()
+                else:
+                    print_formatted_text(HTML(warn + not_allowed_msg), style=style)
             case "onekeyroot":
                 clear(); run("call root.bat"); clear()
             case "openshell":
