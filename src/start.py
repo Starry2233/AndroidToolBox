@@ -844,6 +844,7 @@ def magisk():
         options=[
             ("A", "返回上级菜单"),
             ("1", "刷入Magisk模块"),
+            ("2", "刷入LSPosed-Android8.1机型"),
         ],
         default="A"
     )
@@ -851,6 +852,8 @@ def magisk():
         clear(); return
     if result == "1":
         run("call userinstmodule")
+    if result == "2":
+        run("call InstLSPosed810")
     magisk()
 
 @onerror
