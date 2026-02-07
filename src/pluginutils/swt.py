@@ -1,6 +1,6 @@
 # pluginutils/swt.py
 
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 _ENTRIES: List[Callable] = []
 
@@ -27,7 +27,7 @@ def preload(func: Callable) -> Callable:
 
 
 def get_loads() -> List[Callable]:
-    return list(_ENTRIES)
+    return list(_LOADS)
 
 
 def clear_loads():
@@ -50,27 +50,29 @@ def clear_unloads():
     _UNLOADS.clear()
 
 
-_HOOKS = {}
+HookRecord = Tuple[Callable, Optional[Any]]
+_HOOKS: dict[str, List[HookRecord]] = {}
 
 
-def hook(name: str, data: Optional[set] | None = None):
+def hook(name: str, data: Optional[Any] = None):
     """
-    Docstring for hook
-    
-    接收name参数，当name为load时将在atb启动时加载
-    为entry时将于手动运行插件时加载
-    TODO: 替换v1-bat插件api为这个ATB-PDK-v2Api
-    TODO: 为register-mainmenu时，将注册主菜单新项目然后调用data: 在主菜单注入的名称和回调，示例：('新项目', lambda...)
+    注册钩子。``name`` 决定触发时机，``data`` 可附带额外上下文（如主菜单项元组）。
+    - load: ATB 启动时执行
+    - entry: 手动运行插件时执行
+    - register-mainmenu: 注册主菜单项目，``data`` 约定为 (label, callback)
     """
     def decorator(func: Callable) -> Callable:
-        if name not in _HOOKS:
-            _HOOKS[name] = []
-        _HOOKS[name].append(func)
+        _HOOKS.setdefault(name, []).append((func, data))
         return func
+
     return decorator
 
 
 def get_hooks(name: str) -> List[Callable]:
+    return [fn for fn, _ in _HOOKS.get(name, [])]
+
+
+def get_hook_data(name: str) -> List[HookRecord]:
     return list(_HOOKS.get(name, []))
 
 

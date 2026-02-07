@@ -10,7 +10,7 @@ from pluginutils import AtbPlugins
 from pluginutils.swt import get_entries, clear_entries, clear_unloads, clear_loads, get_unloads, get_hooks, get_loads, clear_hooks
 
 
-def load_plugins(atb_plugins: AtbPlugins, mode: int, cwd: Optional[str] | None = None) -> List[List[Callable], List[set]]:
+def load_plugins(atb_plugins: AtbPlugins, mode: int, cwd: Optional[str] | None = None) -> List[Callable]:
     _cwd = cwd or atb_plugins._get_cwd()
 
     entries: List[Callable] = []
