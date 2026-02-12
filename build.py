@@ -21,7 +21,7 @@ DISPLAY = None  # Global display manager instance
 LOG_PATH = os.path.join("./build", "build.log")
 
 def pick_python_exe():
-    """Choose Python executable preferring .venv312, then .venv, then current."""
+    """Choose python executable preferring .venv312, then .venv, then current."""
     candidates = [
         os.path.join("./.venv312", "Scripts", "python.exe"),
         os.path.join("./.venv", "Scripts", "python.exe"),
@@ -38,18 +38,17 @@ def log_line(text: str):
         f.write(text + "\n")
 
 class DisplayManager:
-    """Dedicated rendering thread: fixed-height progress block always at the bottom, logs embedded within the progress area."""
-    FIXED_HEIGHT = 10  # Fixed block height; pad with empty lines if insufficient, truncate if excessive
+    """单独渲染线程：固定高度进度块始终在底部，日志嵌入进度区内。"""
+    FIXED_HEIGHT = 10  # 固定块高度，不足补空行，多余截断
 
     def __init__(self):
-        # Bounded queue to prevent excessive memory usage due to log overflow
-        self.q: queue.Queue = queue.Queue(maxsize=2000)
+        self.q: queue.SimpleQueue = queue.SimpleQueue()
         self.progress_lines: list[str] = []
         self.recent_logs: list[str] = []
         self.last_frame: str = ""
-        self.drawn = False  # Indicates whether the first frame has been drawn
+        self.drawn = False  # 是否已经画过第一帧
         self.running = True
-        self._cols = 80  # Cached terminal column width
+        self._cols = 80  # 终端列数缓存
         self.paused = False
         try:
             self._cols = os.get_terminal_size().columns
@@ -68,12 +67,13 @@ class DisplayManager:
         self.running = False
         self.q.put(("stop", None))
         self.thread.join(timeout=2)
-        # Note: Do not clear screen here to avoid hiding error messages
-        # Screen clearing is handled separately at successful completion
+        if self.drawn:
+            sys.stdout.write(f"\033[{self.FIXED_HEIGHT}F\033[J")
+            sys.stdout.flush()
 
     def pause_for_input(self):
-        """Clear the progress area before interactive input to ensure the prompt is visible."""
-        # Mark as paused, stop rendering; clear the drawn progress block
+        """在需要交互输入前清理进度区，保证 prompt 可见。"""
+        # 标记为暂停，停止渲染；清理已绘制的进度块
         self.paused = True
         if self.drawn:
             try:
@@ -83,20 +83,20 @@ class DisplayManager:
                 self.drawn = False
 
     def resume(self):
-        """Resume rendering (call after input)."""
-        # Unpause and allow rendering
+        """恢复渲染（在输入后调用）。"""
+        # 解除暂停状态，允许渲染
         self.paused = False
         try:
             self._cols = os.get_terminal_size().columns
         except OSError:
             pass
-        # Ensure the cursor is on a new line before rendering to avoid overwriting input
+        # 在渲染前确保光标在新行，避免覆盖刚刚输入的行
         try:
             sys.__stdout__.write("\n")
             sys.__stdout__.flush()
         except Exception:
             pass
-        # Force redraw of the current frame
+        # 强制重绘当前帧
         try:
             self.last_frame = ""
             self._render()
@@ -104,21 +104,21 @@ class DisplayManager:
             pass
 
     def _truncate(self, s: str) -> str:
-        """Truncate to terminal width - 1 to prevent cursor misalignment due to auto-wrapping."""
+        """截断到终端宽度 - 1，防止自动换行导致光标错位。"""
         max_w = self._cols - 1
         if len(s) > max_w:
             return s[:max_w - 3] + "..."
         return s
 
     def _build_frame(self) -> list[str]:
-        """Construct a fixed-height frame, truncating all lines to terminal width."""
+        """构建固定高度的帧内容，所有行截断到终端宽度。"""
         lines = list(self.progress_lines)
         if self.recent_logs:
             lines.append("─── Log ───")
             lines.extend(self.recent_logs[-3:])
-        # Truncate each line
+        # 截断每一行
         lines = [self._truncate(ln) for ln in lines]
-        # Ensure fixed height: pad with empty lines if insufficient, truncate if excessive
+        # 固定高度：不足补空行，多余截断
         while len(lines) < self.FIXED_HEIGHT:
             lines.append("")
         return lines[:self.FIXED_HEIGHT]
@@ -127,11 +127,11 @@ class DisplayManager:
         frame = self._build_frame()
         frame_str = "\n".join(frame)
         if frame_str == self.last_frame:
-            return  # Skip redraw if the frame is identical
-        # Move up to the start of the block
+            return  # 帧一致不重绘
+        # 上移到块起始位置
         if self.drawn:
             sys.stdout.write(f"\033[{self.FIXED_HEIGHT}F")
-        # Overwrite each line and clear the end of the line
+        # 逐行覆写+清行尾
         for ln in frame:
             sys.stdout.write("\r" + ln + "\033[K\n")
         sys.stdout.flush()
@@ -139,7 +139,7 @@ class DisplayManager:
         self.last_frame = frame_str
 
     def _drain_queue(self) -> bool:
-        """Batch process the queue, returning whether a stop message was encountered."""
+        """批量排空队列，返回是否遇到 stop 消息。"""
         while True:
             try:
                 msg, payload = self.q.get_nowait()
@@ -156,7 +156,7 @@ class DisplayManager:
 
     def _loop(self):
         while self.running:
-            # Wait for at least one message (or timeout)
+            # 等待至少一条消息（或超时）
             try:
                 msg, payload = self.q.get(timeout=0.25)
                 if msg == "stop":
@@ -168,29 +168,29 @@ class DisplayManager:
                 elif msg == "progress":
                     self.progress_lines = payload or []
             except queue.Empty:
-                # Refresh periodically even on timeout
+                # 超时也刷新一次（保持周期渲染）
                 self._render()
                 continue
-            # Batch process remaining messages
+            # 批量排空剩余消息
             if self._drain_queue():
                 break
-            # Skip rendering if paused
+            # 若处于暂停状态则不渲染
             if not self.paused:
                 self._render()
 
 class GradleProgressBar:
-    """Gradle/pip style progress bar, fixed-bottom display of thread slots and tasks."""
+    """Gradle/pip 风格进度条，固定底部显示线程槽位和任务。"""
     def __init__(self, total_tasks, thread_capacity: int = 4, display: DisplayManager | None = None):
         self.total_tasks = max(1, int(total_tasks or 0))
         self.thread_capacity = max(1, thread_capacity)
         self.task_names: list[str] = []
-        self.active_tasks: list[str] = []      # Current running tasks (maintains order)
-        self.completed_set: set[str] = set()   # Only records real completion tasks
+        self.active_tasks: list[str] = []      # 当前运行中的任务（保持顺序）
+        self.completed_set: set[str] = set()   # 仅记录真实完成任务
         self.lock = threading.Lock()
         self.last_height = 0
         self.display = display
-        self.last_rendered_content = ""  # Cache of last rendered content for comparison
-        self._update_display()  # Initialize immediately
+        self.last_rendered_content = ""  # 缓存上次渲染的内容，用于比较
+        self._update_display()  # 初始化立即渲染
 
     def _sync_total_locked(self):
         self.total_tasks = max(1, len(self.task_names))
@@ -259,7 +259,7 @@ class GradleProgressBar:
                     self.display.set_progress(lines)
 
     def redraw(self):
-        """For external use after generating new logs."""
+        """供外部在产生新日志后重绘状态行。"""
         self._update_display()
 
 
@@ -363,15 +363,15 @@ def _require_value(name: str, provided: str | None, default: str | None = None) 
             pass
         return default
     while True:
-        # Before input, pause rendering to ensure prompt is visible
+        # 在输入前暂停渲染，确保 prompt 可见
         try:
             if DISPLAY:
                 DISPLAY.pause_for_input()
         except Exception:
             pass
         try:
-            # Directly write to real stdout, avoid being captured by DisplayManager
-            sys.__stdout__.write(f"Enter {name}: ")
+            # 直接写到真实 stdout，避免被 DisplayManager 捕获
+            sys.__stdout__.write(f"请输入 {name}: ")
             sys.__stdout__.flush()
             line = sys.stdin.readline()
             if line is None:
@@ -379,11 +379,12 @@ def _require_value(name: str, provided: str | None, default: str | None = None) 
             else:
                 val = line.strip()
         finally:
-            # Do not resume rendering here, wait for next prompt
+            # 不在这里恢复渲染，待回显后再恢复
             pass
         if val:
-            # First echo the input to real stdout, ensure user sees it
+            # 先在真实 stdout 回显输入，保证用户能看到
             try:
+                # 只记录到日志文件，不在终端回显用户输入
                 log_line(f"{name} = {val}")
             except Exception:
                 pass
@@ -393,7 +394,7 @@ def _require_value(name: str, provided: str | None, default: str | None = None) 
             except Exception:
                 pass
             return val
-        # Empty input, first resume rendering then prompt error
+        # 空输入，先恢复渲染再提示错误信息
         try:
             if DISPLAY:
                 DISPLAY.resume()
@@ -487,7 +488,7 @@ def run_step(cmd, bar, **kwargs):
 
 
 def run_python_compilation_task(cmd, src_script, exe_name, bar):
-    """Run compilation task, output goes to log file not directly to console."""
+    """运行编译任务，输出走日志不直接写控制台。"""
     p = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
