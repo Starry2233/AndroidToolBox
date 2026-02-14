@@ -734,9 +734,9 @@ def appset():
                 Option("A", "返回上级菜单"),
                 Option("1", "安装应用"),
                 Option("2", "卸载应用"),
-                Option("3", "安装xtc状态栏"),
+                Option("3", "安装状态栏悬浮窗"),
                 Option("4", "设置微信QQ为开机自启应用"),
-                Option("5", "解除z10安装限制"),
+                Option("5", "解除z10 V2版本安装限制-V3不适用"),
             ],
             default="A"
         )
@@ -775,12 +775,12 @@ def userdebug():
             message="开发合集",
             options=[
                 Option("A", "返回上级菜单"),
-                Option("1", "手表信息"),
+                Option("1", "设备信息"),
                 Option("2", "打开充电可用"),
                 Option("3", "型号与innermodel对照表"),
                 Option("4", "导入本地root文件"),
                 Option("5", "一键root[不刷userdata]"),
-                Option("6", "恢复出厂设置[不是超级恢复]"),
+                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
                 Option("7", "开机自刷Recovery"),
                 Option("8", "强制加好友[已失效]"),
             ],
@@ -792,11 +792,11 @@ def userdebug():
             message="开发合集",
             options=[
                 Option("A", "返回上级菜单"),
-                Option("1", "手表信息"),
+                Option("1", "设备信息"),
                 Option("2", "打开充电可用"),
                 Option("3", "型号与innermodel对照表"),
                 Option("4", "导入本地root文件"),
-                Option("6", "恢复出厂设置[不是超级恢复]"),
+                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
                 Option("7", "开机自刷Recovery"),
             ],
             default="A"
@@ -837,7 +837,8 @@ def commonly():
         Option("6", "安卓8.1root后优化"),
         Option("7", "进入qmmi[9008]"),
         Option("8", "scrcpy投屏"),
-        Option("9", "高级重启")
+        Option("9", "高级重启"),
+        Option("11", "开启无线调试")
     ]
     if DEBUG: commonly_list.append(Option("10", "刷入AnyKernel3[实验性]"))
     if allow_xtc:
@@ -878,6 +879,8 @@ def commonly():
         case "10":
             clear()
             anykernel3()
+        case "11":
+            run("call wifiadb")
         case _:
             print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
     commonly()
@@ -892,6 +895,7 @@ def magisk():
             Option("A", "返回上级菜单"),
             Option("1", "刷入Magisk模块"),
             # Option("2", "刷入LSPosed-Android8.1机型"),
+            Option("3", "刷入Xposed框架-适用于安卓4.4.4和7.1.1"),
         ],
         default="A"
     )
@@ -900,6 +904,8 @@ def magisk():
         run("call userinstmodule")
     if result == "2":
         run("call InstLSPosed810")
+    if result == "3":
+        run("call Xposed")
     magisk()
 
 
