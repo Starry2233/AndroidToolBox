@@ -929,216 +929,216 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
         )
         gradle_bar.complete_task(":install-requirements")
 
-        # Execute remaining build tasks in parallel (these can use all threads)
-        def rust_task():
-            custom_write("Building Rust Sources")
-            gradle_bar.start_task(":rust:build")
-            run_step(
-                ["cargo", "build", "--release", "--target-dir", "./build/rust"],
-                None,  # No progress bar for this step since we're using gradle_bar
-                shell=True
-            ) if profile == 0 else run_step(
-                ["cargo", "build", "--target-dir", "./build/rust"],
-                None,  # No progress bar for this step since we're using gradle_bar
-                shell=True
-            )
-            gradle_bar.complete_task(":rust:build")
+    # Execute remaining build tasks in parallel (these can use all threads)
+    def rust_task():
+        custom_write("Building Rust Sources")
+        gradle_bar.start_task(":rust:build")
+        run_step(
+            ["cargo", "build", "--release", "--target-dir", "./build/rust"],
+            None,  # No progress bar for this step since we're using gradle_bar
+            shell=True
+        ) if profile == 0 else run_step(
+            ["cargo", "build", "--target-dir", "./build/rust"],
+            None,  # No progress bar for this step since we're using gradle_bar
+            shell=True
+        )
+        gradle_bar.complete_task(":rust:build")
 
-        def filedialog_task():
-            custom_write("Building FileDialog")
-            gradle_bar.start_task(":filedialog:build")
-            run_step(
-                [dotnet_exe, "build", "./src/FileDialog/FileDialog.csproj", "-c", "Release", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
-                None  # No progress bar for this step since we're using gradle_bar
-            ) if profile == 0 else run_step(
-                [dotnet_exe, "build", "./src/FileDialog/FileDialog.csproj", "-c", "Debug", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
-                None  # No progress bar for this step since we're using gradle_bar
-            )
-            gradle_bar.complete_task(":filedialog:build")
+    def filedialog_task():
+        custom_write("Building FileDialog")
+        gradle_bar.start_task(":filedialog:build")
+        run_step(
+            [dotnet_exe, "build", "./src/FileDialog/FileDialog.csproj", "-c", "Release", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
+            None  # No progress bar for this step since we're using gradle_bar
+        ) if profile == 0 else run_step(
+            [dotnet_exe, "build", "./src/FileDialog/FileDialog.csproj", "-c", "Debug", "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"],
+            None  # No progress bar for this step since we're using gradle_bar
+        )
+        gradle_bar.complete_task(":filedialog:build")
 
-        def extract_task():
-            custom_write("Extracting Binaries")
-            gradle_bar.start_task(":extract:binaries")
-            with py7zr.SevenZipFile('bin.7z', mode='r') as z:
-                z.extractall(path='./build/main/bin')
-            gradle_bar.complete_task(":extract:binaries")
+    def extract_task():
+        custom_write("Extracting Binaries")
+        gradle_bar.start_task(":extract:binaries")
+        with py7zr.SevenZipFile('bin.7z', mode='r') as z:
+            z.extractall(path='./build/main/bin')
+        gradle_bar.complete_task(":extract:binaries")
 
-        if python_builder == 1:
-            custom_write("Preparing Nuitka")
-            gcc = os.path.dirname(
-                subprocess.run(
-                    ["cmd", "/c", "where", "gcc.exe"],
-                    stdout=subprocess.PIPE
-                ).stdout.decode("utf-8").replace("\r\n", "")
-            )
+    if python_builder == 1:
+        custom_write("Preparing Nuitka")
+        gcc = os.path.dirname(
+            subprocess.run(
+                ["cmd", "/c", "where", "gcc.exe"],
+                stdout=subprocess.PIPE
+            ).stdout.decode("utf-8").replace("\r\n", "")
+        )
 
-            nuitka_gcc = os.getenv("LOCALAPPDATA") + r"\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64"
-            if not os.path.exists(nuitka_gcc):
-                os.makedirs(nuitka_gcc, exist_ok=True)
-                os.symlink(gcc, nuitka_gcc + r"\bin")
+        nuitka_gcc = os.getenv("LOCALAPPDATA") + r"\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64"
+        if not os.path.exists(nuitka_gcc):
+            os.makedirs(nuitka_gcc, exist_ok=True)
+            os.symlink(gcc, nuitka_gcc + r"\bin")
 
-            # Define the Python compilation tasks
-            python_scripts = [
-                ("run_cmd.py", "run_cmd.exe"),
-                ("repair.py", "repair.exe"),
-                ("menu.py", "menu.exe"),
-                ("start.py", "main.exe")
-            ]
+        # Define the Python compilation tasks
+        python_scripts = [
+            ("run_cmd.py", "run_cmd.exe"),
+            ("repair.py", "repair.exe"),
+            ("menu.py", "menu.exe"),
+            ("start.py", "main.exe")
+        ]
 
-            # Determine the number of threads to use for Nuitka compilation (max 2 to prevent OOM)
-            nuitka_max_threads = min(max_threads, 2)
+        # Determine the number of threads to use for Nuitka compilation (max 2 to prevent OOM)
+        nuitka_max_threads = min(max_threads, 2)
 
-            # Prepare commands based on profile
-            commands = []
-            for src_script, exe_name in python_scripts:
-                if profile == 0:  # Release build
-                    cmd = [python_exe, "-m", "nuitka",
-                           "--onefile", "--lto=yes", "--output-dir=./build/py/dist",
-                           f"src/{src_script}", nuitka_compiler_flag, "--nofollow-import-to=debughook"]
-                else:  # Debug build
-                    cmd = [python_exe, "-m", "nuitka",
-                           "--onefile", "--lto=no", "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
-                           f"src/{src_script}", nuitka_compiler_flag, "--include-module=debughook"]
-                commands.append((cmd, src_script, exe_name))
+        # Prepare commands based on profile
+        commands = []
+        for src_script, exe_name in python_scripts:
+            if profile == 0:  # Release build
+                cmd = [python_exe, "-m", "nuitka",
+                       "--onefile", "--lto=yes", "--output-dir=./build/py/dist",
+                       f"src/{src_script}", nuitka_compiler_flag, "--nofollow-import-to=debughook"]
+            else:  # Debug build
+                cmd = [python_exe, "-m", "nuitka",
+                       "--onefile", "--lto=no", "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
+                       f"src/{src_script}", nuitka_compiler_flag, "--include-module=debughook"]
+            commands.append((cmd, src_script, exe_name))
 
-            # Execute Python compilation tasks in parallel with limited threads for Nuitka
-            def nuitka_task(cmd, src_script, exe_name):
-                gradle_bar.start_task(f":nuitka:{src_script.replace('.py', '')}")
-                try:
-                    run_python_compilation_task(cmd, src_script, exe_name, None)
-                finally:
-                    gradle_bar.complete_task(f":nuitka:{src_script.replace('.py', '')}")
-
-            with ThreadPoolExecutor(max_workers=nuitka_max_threads) as nuitka_executor:
-                nuitka_futures = []
-                for cmd, src_script, exe_name in commands:
-                    future = nuitka_executor.submit(nuitka_task, cmd, src_script, exe_name)
-                    nuitka_futures.append(future)
-
-                # Wait for all Nuitka tasks to complete
-                for future in as_completed(nuitka_futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        # Stop progress rendering thread to prevent error messages from being cleared
-                        try:
-                            if DISPLAY:
-                                DISPLAY.stop()
-                        except Exception:
-                            pass
-                        # Write directly to real terminal stdout to ensure visibility
-                        try:
-                            msg = f"Error during Nuitka task: {e}"
-                            sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
-                            text = str(e)
-                            if "\n" in text:
-                                sys.__stdout__.write("---- details ----\n")
-                                sys.__stdout__.write(text + "\n")
-                            sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
-                            sys.__stdout__.flush()
-                        except Exception:
-                            print(f"Error during Nuitka task: {e}", file=sys.__stdout__)
-                        raise
-        else:
-            # Define the Python compilation tasks for PyInstaller
-            python_scripts = [
-                ("run_cmd.py", "run_cmd.exe"),
-                ("repair.py", "repair.exe"),
-                ("menu.py", "menu.exe"),
-                ("start.py", "main.exe")
-            ]
-
-            # Prepare commands based on profile
-            commands = []
-            for src_script, exe_name in python_scripts:
-                if profile == 0:  # Release build
-                    cmd = pyinstaller_cmd(python_exe, f"src/{src_script}", "./build/py/dist", debug=False, upx_dir=upx_dir)
-                else:  # Debug build
-                    cmd = pyinstaller_cmd(python_exe, f"src/{src_script}", "./build/py/dist", debug=True, upx_dir=upx_dir)
-                commands.append((cmd, src_script, exe_name))
-
-            # Execute Python compilation tasks in parallel with full thread count for PyInstaller
-            def pyinstaller_task(cmd, src_script, exe_name):
-                gradle_bar.start_task(f":pyinstaller:{src_script.replace('.py', '')}")
-                try:
-                    run_python_compilation_task(cmd, src_script, exe_name, None)
-                finally:
-                    gradle_bar.complete_task(f":pyinstaller:{src_script.replace('.py', '')}")
-
-            with ThreadPoolExecutor(max_workers=max_threads) as py_executor:
-                py_futures = []
-                for cmd, src_script, exe_name in commands:
-                    future = py_executor.submit(pyinstaller_task, cmd, src_script, exe_name)
-                    py_futures.append(future)
-
-                # Wait for all PyInstaller tasks to complete
-                for future in as_completed(py_futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        # Stop progress rendering thread to prevent error messages from being cleared
-                        try:
-                            if DISPLAY:
-                                DISPLAY.stop()
-                        except Exception:
-                            pass
-                        # Write directly to real terminal stdout to ensure visibility
-                        try:
-                            msg = f"Error during PyInstaller task: {e}"
-                            sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
-                            text = str(e)
-                            if "\n" in text:
-                                sys.__stdout__.write("---- details ----\n")
-                                sys.__stdout__.write(text + "\n")
-                            sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
-                            sys.__stdout__.flush()
-                        except Exception:
-                            print(f"Error during PyInstaller task: {e}", file=sys.__stdout__)
-                        raise
-
-        # Start the other build tasks in parallel using all available threads
-        other_tasks_executor = ThreadPoolExecutor(max_workers=max_threads)
-
-        # Submit remaining tasks to thread pool
-        other_futures = []
-
-        # Rust build
-        other_futures.append(other_tasks_executor.submit(rust_task))
-
-        # FileDialog build
-        other_futures.append(other_tasks_executor.submit(filedialog_task))
-
-        # Extract binaries
-        other_futures.append(other_tasks_executor.submit(extract_task))
-
-        # Wait for all other tasks to complete
-        for future in as_completed(other_futures):
+        # Execute Python compilation tasks in parallel with limited threads for Nuitka
+        def nuitka_task(cmd, src_script, exe_name):
+            gradle_bar.start_task(f":nuitka:{src_script.replace('.py', '')}")
             try:
-                future.result()
-            except Exception as e:
-                # Stop progress rendering thread to prevent error messages from being cleared
-                try:
-                    if DISPLAY:
-                        DISPLAY.stop()
-                except Exception:
-                    pass
-                # Write directly to real terminal stdout to ensure visibility
-                try:
-                    msg = f"Error during other task: {e}"
-                    sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
-                    text = str(e)
-                    if "\n" in text:
-                        sys.__stdout__.write("---- details ----\n")
-                        sys.__stdout__.write(text + "\n")
-                    sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
-                    sys.__stdout__.flush()
-                except Exception:
-                    print(f"Error during other task: {e}", file=sys.__stdout__)
-                # No longer raise exception, let @onerror decorator handle exit logic
-                return 1
+                run_python_compilation_task(cmd, src_script, exe_name, None)
+            finally:
+                gradle_bar.complete_task(f":nuitka:{src_script.replace('.py', '')}")
 
-        # Shutdown the other tasks executor
-        other_tasks_executor.shutdown(wait=True)
+        with ThreadPoolExecutor(max_workers=nuitka_max_threads) as nuitka_executor:
+            nuitka_futures = []
+            for cmd, src_script, exe_name in commands:
+                future = nuitka_executor.submit(nuitka_task, cmd, src_script, exe_name)
+                nuitka_futures.append(future)
+
+            # Wait for all Nuitka tasks to complete
+            for future in as_completed(nuitka_futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    # Stop progress rendering thread to prevent error messages from being cleared
+                    try:
+                        if DISPLAY:
+                            DISPLAY.stop()
+                    except Exception:
+                        pass
+                    # Write directly to real terminal stdout to ensure visibility
+                    try:
+                        msg = f"Error during Nuitka task: {e}"
+                        sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
+                        text = str(e)
+                        if "\n" in text:
+                            sys.__stdout__.write("---- details ----\n")
+                            sys.__stdout__.write(text + "\n")
+                        sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
+                        sys.__stdout__.flush()
+                    except Exception:
+                        print(f"Error during Nuitka task: {e}", file=sys.__stdout__)
+                    raise
+    else:
+        # Define the Python compilation tasks for PyInstaller
+        python_scripts = [
+            ("run_cmd.py", "run_cmd.exe"),
+            ("repair.py", "repair.exe"),
+            ("menu.py", "menu.exe"),
+            ("start.py", "main.exe")
+        ]
+
+        # Prepare commands based on profile
+        commands = []
+        for src_script, exe_name in python_scripts:
+            if profile == 0:  # Release build
+                cmd = pyinstaller_cmd(python_exe, f"src/{src_script}", "./build/py/dist", debug=False, upx_dir=upx_dir)
+            else:  # Debug build
+                cmd = pyinstaller_cmd(python_exe, f"src/{src_script}", "./build/py/dist", debug=True, upx_dir=upx_dir)
+            commands.append((cmd, src_script, exe_name))
+
+        # Execute Python compilation tasks in parallel with full thread count for PyInstaller
+        def pyinstaller_task(cmd, src_script, exe_name):
+            gradle_bar.start_task(f":pyinstaller:{src_script.replace('.py', '')}")
+            try:
+                run_python_compilation_task(cmd, src_script, exe_name, None)
+            finally:
+                gradle_bar.complete_task(f":pyinstaller:{src_script.replace('.py', '')}")
+
+        with ThreadPoolExecutor(max_workers=max_threads) as py_executor:
+            py_futures = []
+            for cmd, src_script, exe_name in commands:
+                future = py_executor.submit(pyinstaller_task, cmd, src_script, exe_name)
+                py_futures.append(future)
+
+            # Wait for all PyInstaller tasks to complete
+            for future in as_completed(py_futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    # Stop progress rendering thread to prevent error messages from being cleared
+                    try:
+                        if DISPLAY:
+                            DISPLAY.stop()
+                    except Exception:
+                        pass
+                    # Write directly to real terminal stdout to ensure visibility
+                    try:
+                        msg = f"Error during PyInstaller task: {e}"
+                        sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
+                        text = str(e)
+                        if "\n" in text:
+                            sys.__stdout__.write("---- details ----\n")
+                            sys.__stdout__.write(text + "\n")
+                        sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
+                        sys.__stdout__.flush()
+                    except Exception:
+                        print(f"Error during PyInstaller task: {e}", file=sys.__stdout__)
+                    raise
+
+    # Start the other build tasks in parallel using all available threads
+    other_tasks_executor = ThreadPoolExecutor(max_workers=max_threads)
+
+    # Submit remaining tasks to thread pool
+    other_futures = []
+
+    # Rust build
+    other_futures.append(other_tasks_executor.submit(rust_task))
+
+    # FileDialog build
+    other_futures.append(other_tasks_executor.submit(filedialog_task))
+
+    # Extract binaries
+    other_futures.append(other_tasks_executor.submit(extract_task))
+
+    # Wait for all other tasks to complete
+    for future in as_completed(other_futures):
+        try:
+            future.result()
+        except Exception as e:
+            # Stop progress rendering thread to prevent error messages from being cleared
+            try:
+                if DISPLAY:
+                    DISPLAY.stop()
+            except Exception:
+                pass
+            # Write directly to real terminal stdout to ensure visibility
+            try:
+                msg = f"Error during other task: {e}"
+                sys.__stdout__.write(colorama.Fore.RED + "E: " + colorama.Fore.RESET + msg + "\n")
+                text = str(e)
+                if "\n" in text:
+                    sys.__stdout__.write("---- details ----\n")
+                    sys.__stdout__.write(text + "\n")
+                sys.__stdout__.write(f"See full log: {LOG_PATH}\n")
+                sys.__stdout__.flush()
+            except Exception:
+                print(f"Error during other task: {e}", file=sys.__stdout__)
+            # No longer raise exception, let @onerror decorator handle exit logic
+            return 1
+
+    # Shutdown the other tasks executor
+    other_tasks_executor.shutdown(wait=True)
 
     # Move copy operations to the end of the build process
     gradle_bar.start_task(":copy:files")
@@ -1155,8 +1155,13 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
 
     def find_py_output(names):
         dist = "./build/py/dist"
+        # Fresh build folders may not have outputs in dist yet if backend names differ.
+        # Try both canonical names and common emitted variants.
+        candidates = []
         for n in names:
-            candidate = os.path.join(dist, f"{n}.exe")
+            candidates.append(os.path.join(dist, f"{n}.exe"))
+            candidates.append(os.path.join(dist, f"{n}.bin.exe"))
+        for candidate in candidates:
             if os.path.isfile(candidate):
                 return candidate
         return None
@@ -1178,10 +1183,18 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
             missing.append(f"{key} ({' / '.join(names)})")
 
     if missing:
-        custom_write("Missing built executables:")
+        error_lines = ["Missing built executables:"]
         for m in missing:
-            custom_write(f" - {m}")
-        custom_write("PyInstaller/Nuitka likely failed earlier. Check build output above.")
+            error_lines.append(f" - {m}")
+        error_lines.append("PyInstaller/Nuitka likely failed earlier. Check build output above.")
+        
+        # 输出到日志和标准错误流
+        for line in error_lines:
+            custom_write(line)
+            # 同时输出到标准错误流，确保用户能看到
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+        
         return 1
 
     gradle_bar.start_task(":copy:executables")
