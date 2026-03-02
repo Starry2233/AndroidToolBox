@@ -37,17 +37,11 @@ import traceback
 import pluginutils, pluginutils.load, pluginutils.manage
 
 try:
-    from build_info import (
-        BUILD_TYPE,
-        ALLOW_XTC,
-    )
+    from build_info import BUILD_TYPE
 except Exception:
     BUILD_TYPE = "release"
-    SOFT_VERSION = ""
-    BUILD_VERSION = ""
-    PRODUCT_COMMIT = ""
-    BUILD_DATE_UTC = "0"
-    ALLOW_XTC = False
+# 强制 ALLOW_XTC 永远为 True
+ALLOW_XTC = True
 
 
 class MultilineFormatter(logging.Formatter):
@@ -83,6 +77,9 @@ WARN = "<orange>[警告]</orange>"
 flag = False
 key = False
 started = False
+_RUN_ENV_READY = False
+_RUN_ENV_CACHE: Optional[Dict[str, str]] = None
+_PATHEXT_EXTRA = [".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".VBE", ".JS", ".JSE", ".WSF", ".WSH", ".MSC"]
 
 
 def _normalize_build_type(value: str) -> str:
@@ -92,12 +89,12 @@ def _normalize_build_type(value: str) -> str:
 BUILD_MODE = _normalize_build_type(BUILD_TYPE)
 CURRENT_BUILD_META: Dict[str, str] = {
     "ro.build.type": BUILD_MODE,
-    "persist.atb.xtc.allow": "True" if bool(ALLOW_XTC) else "False",
+    "persist.atb.xtc.allow": "True",
 }
 
 LINE = "-" * 68
 DEBUG = BUILD_MODE == "debug"
-allow_xtc = bool(ALLOW_XTC)
+allow_xtc = True
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -164,15 +161,66 @@ def auto_clear(fn=None, *, logo=False, end=False):
     return decorator(fn) if fn is not None else decorator
 
 
-def run(cmd):
-    subprocess.run(["cmd.exe", "/v:on", "/c", f'''
-                    @echo off &
-                    setlocal enabledelayedexpansion 1>nul 2>nul &
-                    call .\\color.bat &
-                    set PATHEXT=%PATHEXT%;.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC; &
-                    @{cmd} &
-                    endlocal 1>nul 2>nul &
-                    '''.replace("\n", "").replace(20*" ", "")])
+def _build_run_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    current_ext = str(env.get("PATHEXT") or "")
+    ext_items = [item.strip() for item in current_ext.split(";") if item.strip()]
+    ext_upper = {item.upper() for item in ext_items}
+    for item in _PATHEXT_EXTRA:
+        if item.upper() not in ext_upper:
+            ext_items.append(item)
+            ext_upper.add(item.upper())
+    env["PATHEXT"] = ";".join(ext_items)
+    return env
+
+
+def _ensure_run_initialized() -> Dict[str, str]:
+    global _RUN_ENV_READY
+    global _RUN_ENV_CACHE
+
+    if _RUN_ENV_CACHE is None:
+        _RUN_ENV_CACHE = _build_run_env()
+
+    if not _RUN_ENV_READY:
+        if os.path.isfile(".\\color.bat"):
+            try:
+                subprocess.run(
+                    ["cmd.exe", "/d", "/c", "call .\\color.bat"],
+                    env=_RUN_ENV_CACHE,
+                    check=False,
+                )
+            except Exception:
+                logger.exception("Failed to initialize color environment")
+        _RUN_ENV_READY = True
+
+    return _RUN_ENV_CACHE.copy()
+
+
+def run(
+    cmd: str,
+    *,
+    extra_env: Optional[Dict[str, str]] = None,
+    capture_output: bool = False,
+    check: bool = False,
+) -> subprocess.CompletedProcess:
+    env = _ensure_run_initialized()
+    if extra_env:
+        env.update({str(k): str(v) for k, v in extra_env.items()})
+
+    # 保证每次执行都包含@echo off，无论cmd内容如何
+    if "@echo off" not in cmd.lower():
+        batch = "@echo off & " + f"{cmd} & " + "exit /b !ERRORLEVEL!"
+    else:
+        batch = f"{cmd} & exit /b !ERRORLEVEL!"
+
+    return subprocess.run(
+        ["cmd.exe", "/v:on", "/c", batch],
+        env=env,
+        capture_output=capture_output,
+        text=capture_output,
+        errors="replace" if capture_output else None,
+        check=check,
+    )
 
 
 def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
@@ -474,7 +522,7 @@ def menu() -> str:
         Option("man-apps", "应用管理[子菜单]"),
         Option("magisk-mod", "magisk模块管理[子菜单]"),
     ]
-    options.append(Option("user-debug", "Advanced Options[子菜单]"))
+    options.append(Option("user-debug", "高级菜单[子菜单]"))
     options.append(Option("exit", "退出工具"))
 
     result = choose(
@@ -1063,6 +1111,7 @@ def pre_main() -> bool:
                 run(f'cd /d mod\\{item} && call start.bat')
 
     try:
+        this_path = os.path.dirname(os.path.abspath(__file__))
         candidate_bin = os.path.normpath(os.path.join(this_path, "..", "bin"))
         if os.path.isdir(candidate_bin):
             os.chdir(candidate_bin)
@@ -1093,10 +1142,8 @@ def pre_main() -> bool:
             meta_update = CURRENT_BUILD_META
             is_debug_build = DEBUG
             base = "https://raw.githubusercontent.com/xgj236/AllToolBox/main"
-            utc_url = f"{base}/utctmp.txt"
             version_tmp_url = f"{base}/versiontmp.txt"
             if is_debug_build:
-                utc_url = f"{base}/betautctmp.txt"
                 version_tmp_url = f"{base}/betaversiontmp.txt"
 
             local_path = "bugversion.txt"
@@ -1111,7 +1158,7 @@ def pre_main() -> bool:
                     filev = 0
 
             resp = requests.get(
-                utc_url,
+                version_tmp_url,
                 headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36)'},
                 timeout=8
             )
@@ -1147,24 +1194,7 @@ def pre_main() -> bool:
             pass
         run("call upall.bat run")
 
-    try:
-        if str(CURRENT_BUILD_META.get("persist.atb.xtc.allow", "")).lower() in ("true", "1", "yes", "y"):
-            allow_xtc = True
-        elif debug_features_allowed():
-            allow_xtc = True
-        else:
-            try:
-                allow_xtc = requests.get(
-                    "https://atb.xgj.qzz.io/other/xtcpolicy.json",
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36)'},
-                    timeout=8
-                ).json().get("allowXTC", False)
-            except Exception:
-                logger.error(traceback.format_exc())
-                allow_xtc = False
-    except Exception:
-        logger.error(traceback.format_exc())
-        allow_xtc = False
+    allow_xtc = True
 
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
         print_formatted_text(HTML(INFO + "正在检查Windows属性..."), style=style)
