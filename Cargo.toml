@@ -25,7 +25,7 @@ serde_json = "1.0"
 walkdir = "2.5"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 strip = true
 panic = "abort"

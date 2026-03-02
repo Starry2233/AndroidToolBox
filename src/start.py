@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import logging
-import argparse
 import os
 import sys
 import shutil
@@ -36,12 +35,23 @@ import filehash
 import json
 import traceback
 import pluginutils, pluginutils.load, pluginutils.manage
-from pathlib import Path
 
 try:
-    import debughook
-except ImportError:
-    pass
+    from build_info import (
+        BUILD_TYPE,
+        SOFT_VERSION,
+        BUILD_VERSION,
+        PRODUCT_COMMIT,
+        BUILD_DATE_UTC,
+        ALLOW_XTC,
+    )
+except Exception:
+    BUILD_TYPE = "release"
+    SOFT_VERSION = ""
+    BUILD_VERSION = ""
+    PRODUCT_COMMIT = ""
+    BUILD_DATE_UTC = "0"
+    ALLOW_XTC = False
 
 
 class MultilineFormatter(logging.Formatter):
@@ -77,13 +87,21 @@ WARN = "<orange>[警告]</orange>"
 flag = False
 key = False
 started = False
-BUILD_CONF_PATH: Optional[Path] = None
-CURRENT_BUILD_META: Dict[str, str] = {}
-ENV_HEADER_CLICK_COUNT = 0
+
+
+def _normalize_build_type(value: str) -> str:
+    return "debug" if str(value).strip().lower() == "debug" else "release"
+
+
+BUILD_MODE = _normalize_build_type(BUILD_TYPE)
+CURRENT_BUILD_META: Dict[str, str] = {
+    "ro.build.type": BUILD_MODE,
+    "persist.atb.xtc.allow": "True" if bool(ALLOW_XTC) else "False",
+}
 
 LINE = "-" * 68
-DEBUG = os.getenv("ATB_DEBUG_MODE", "0") == "1"
-allow_xtc = False
+DEBUG = BUILD_MODE == "debug"
+allow_xtc = bool(ALLOW_XTC)
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -161,7 +179,7 @@ def run(cmd):
                     '''.replace("\n", "").replace(20*" ", "")])
 
 
-def checkwin() -> Tuple[str, str, str, str]:
+def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
     return (
         platform.system(),
         platform.release(),
@@ -198,87 +216,8 @@ def check_adb_server() -> Tuple[bool, Optional[Exception]]:
 
 """ CONFIGURATION/BUILD FUNCTIONS """
 
-def load_build_metadata() -> Tuple[Dict[str, str], bool, Optional[Path]]:
-    """Load build metadata from conf/build.conf if present.
-
-    Returns (metadata, found_flag, conf_path).
-    """
-    base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
-    candidates = [
-        base_dir / "conf" / "build.conf",
-        base_dir.parent / "conf" / "build.conf",
-        base_dir / ".." / "bin" / "conf" / "build.conf",
-        Path.cwd() / "conf" / "build.conf",
-    ]
-    meta: Dict[str, str] = {}
-    conf_path: Optional[Path] = None
-    for cand in candidates:
-        if cand.is_file():
-            conf_path = cand
-            break
-    if not conf_path:
-        # Auto-create a minimal build.conf with safe defaults when missing.
-        conf_path = candidates[0]
-        try:
-            conf_path.parent.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "ro.build.type": "release",
-            }
-            write_build_metadata(conf_path, meta)
-            return meta, True, conf_path
-        except Exception:
-            return meta, False, None
-    try:
-        with conf_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                meta[k.strip()] = v.strip()
-    except Exception:
-        return meta, False, conf_path
-    return meta, True, conf_path
-
-
-def write_build_metadata(conf_path: Path, meta: Dict[str, str]) -> None:
-    keys_in_order = list(meta.keys())
-    with conf_path.open("w", encoding="utf-8") as f:
-        for k in keys_in_order:
-            f.write(f"{k}={meta[k]}\n")
-
-
-def toggle_environment(conf_path: Path, meta: Dict[str, str]) -> str:
-    """Toggle between release and userdebug environment by updating build.conf."""
-    is_userdebug = (
-        meta.get("ro.build.type") == "userdebug"
-    )
-
-    if is_userdebug:
-        meta["ro.build.type"] = "release"
-        target = "release"
-    else:
-        meta["ro.build.type"] = "userdebug"
-        target = "userdebug"
-
-    write_build_metadata(conf_path, meta)
-    return target
-
-
-def debug_features_allowed(meta: Dict[str, str]) -> bool:
-    return (
-        (
-            meta.get("ro.build.type") == "debug"
-        )
-        or
-        (
-            meta.get("ro.build.type") == "userdebug"
-        )
-        or
-        (
-            meta.get("ro.build.type") == "Debug"
-        )
-    )
+def debug_features_allowed() -> bool:
+    return DEBUG
 
 
 """ UI/MENU FUNCTIONS """
@@ -304,7 +243,7 @@ def menu_choice(
     header_rows = 1 if header_text else 0
 
     if default is not None:
-        for idx, (value, _) in enumerate(option_list):
+        for idx, (value, _label) in enumerate(option_list):
             if value == default:
                 selected_index = idx
                 display_index = idx
@@ -469,7 +408,11 @@ def menu_choice(
                     selected_index = visible_count - 1
                 get_app().invalidate()
                 await asyncio.sleep(0.03)
-        app.pre_run_callables.append(lambda: app.create_background_task(_animate_in()))
+
+        def _schedule_animate_in() -> None:
+            app.create_background_task(_animate_in())
+
+        app.pre_run_callables.append(_schedule_animate_in)
 
     result = app.run()
     if result is None:
@@ -501,7 +444,7 @@ def choose(message: str, options: Iterable[Option], default: Optional[str] = Non
 
 @onerror
 def menu() -> str:
-    global ENV_HEADER_CLICK_COUNT, BUILD_CONF_PATH, CURRENT_BUILD_META
+    global CURRENT_BUILD_META
     if os.path.exists("mod") and os.path.isdir("mod"):
         print_formatted_text(HTML("已加载扩展列表："), style=style) if len(os.listdir("mod")) != 0 else print_formatted_text(HTML("已加载扩展列表：未加载任何扩展"), style=style)
         if len(os.listdir("mod")) != 0:
@@ -521,42 +464,30 @@ def menu() -> str:
 
     print_formatted_text(ANSI("鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能"))
 
-    def header_click():
-        global ENV_HEADER_CLICK_COUNT
-        ENV_HEADER_CLICK_COUNT += 1
-        if ENV_HEADER_CLICK_COUNT >= 10:
-            ENV_HEADER_CLICK_COUNT = 0
-            if not BUILD_CONF_PATH:
-                print_formatted_text(HTML(ERROR + "未找到 build.conf，无法切换环境"), style=style)
-                return
-            try:
-                target_env = toggle_environment(BUILD_CONF_PATH, CURRENT_BUILD_META)
-                print_formatted_text(HTML(INFO + f"已切换环境为: {target_env}"), style=style)
-            except Exception as exc:
-                print_formatted_text(HTML(ERROR + f"切换环境失败: {exc}"), style=style)
-
     # Compose header with embedded softversion if available.
     version_str = CURRENT_BUILD_META.get("ro.product.current.softversion") or ""
     header = f"AllToolBox {version_str} 控制台&主菜单 by xgj_236" if version_str else "AllToolBox 控制台&主菜单 by xgj_236"
 
+    options = [
+        Option("onekeyroot", "一键Root"),
+        Option("openshell", "在此处打开cmd[含adb环境]"),
+        Option("about", "关于脚本"),
+        Option("mods", "扩展管理"),
+        Option("commonly", "常用合集[子菜单]"),
+        Option("help-links", "链接合集[子菜单]"),
+        Option("man-apps", "应用管理[子菜单]"),
+        Option("magisk-mod", "magisk模块管理[子菜单]"),
+    ]
+    options.append(Option("user-debug", "Advanced Options[子菜单]"))
+    options.append(Option("exit", "退出工具"))
+
     result = choose(
         message="",
-        options=[
-            Option("onekeyroot", "一键Root"),
-            Option("openshell", "在此处打开cmd[含adb环境]"),
-            Option("about", "关于脚本"),
-            Option("mods", "扩展管理"),
-            Option("commonly", "常用合集[子菜单]"),
-            Option("help-links", "链接合集[子菜单]"),
-            Option("man-apps", "应用管理[子菜单]"),
-            Option("magisk-mod", "magisk模块管理[子菜单]"),
-            Option("user-debug", "开发合集[子菜单]"),
-            Option("exit", "退出工具")
-        ],
+        options=options,
         default="onekeyroot",
         extra_bindings=kb,
         header_text=header,
-        header_click_callback=header_click,
+        header_click_callback=None,
     )
 
     clear()
@@ -613,80 +544,54 @@ def flash_partation(imgpath: str, part: Optional[str] = "boot"):
     run(f"fastboot.exe flash {part} {imgpath}")
 
 
+def _extract_boot_to_tmp(paths: List[str], partition_name: str) -> bool:
+    run("adb start-server 1>nul")
+    run("device_check.exe adb")
+    print_formatted_text("\n", style=style)
+    for prefix in paths:
+        process = subprocess.run(["adb.exe", "shell", f"su -c \"dd if={prefix}{partition_name} of=/sdcard/boot.img bs=2048\""])
+        if process.returncode == 0:
+            break
+    process = subprocess.run(["adb.exe", "pull", "/sdcard/boot.img", "./tmp/boot.img"])
+    return process.returncode == 0
+
+
 @auto_clear
 @onerror
 def anykernel3():
     paths = ["/dev/block/by-name/", "/dev/block/bootdevice/by-name"]
-    print_formatted_text(HTML(WARN + "目前仅支持boot.img修补，并可能存在未知问题！"), style=style)
-    result = choose(message="", options=[
-        Option("A", "返回上级菜单"),
-        Option("1", "A-only槽位"),
-        Option("2", "AB分区-A槽位"),
-        Option("3", "AB分区-B槽位")
-    ], default="A")
-    match result:
-        case "A":
+    mapping = {
+        "1": ("boot", "boot"),
+        "2": ("boot_a", "boot_a"),
+        "3": ("boot_b", "boot_b"),
+    }
+
+    while True:
+        print_formatted_text(HTML(WARN + "目前仅支持boot.img修补，并可能存在未知问题！"), style=style)
+        result = choose(message="", options=[
+            Option("A", "返回上级菜单"),
+            Option("1", "A-only槽位"),
+            Option("2", "AB分区-A槽位"),
+            Option("3", "AB分区-B槽位")
+        ], default="A")
+        if result == "A":
             clear()
             return
-        case "1":
-            run("adb start-server 1>nul")
-            run("device_check.exe adb")
-            print_formatted_text("\n", style=style)
-            for i in paths:
-                process = subprocess.run(["adb.exe", "shell", f"su -c \"dd if={i}boot of=/sdcard/boot.img bs=2048"], )
-                if process.returncode == 0:
-                    break
-            process = subprocess.run(["adb.exe", "pull", "/sdcard/boot.img", "./tmp/boot.img"])
-            if process.returncode != 0:
-                print_formatted_text(HTML(ERROR + "提取Boot失败"))
-                return 1
-            print_formatted_text(HTML(INFO + "请加载AnyKernel3 Zip"), style=style)
-            run("call sel file s .")
-            with open("./tmp/output.txt", "r", encoding="utf-8") as f:
-                filepath = f.read().rstrip("\r\n").rstrip("\n")
-                flash_anykernel3(filepath, "./tmp/boot.img")
-                flash_partation("./tmp/boot_patched.img", "boot")
-            print_formatted_text(HTML(INFO + "刷入成功"), style=style)
-        case "2":
-            run("adb start-server 1>nul")
-            run("device_check.exe adb")
-            print_formatted_text("\n", style=style)
-            for i in paths:
-                process = subprocess.run(["adb.exe", "shell", f"su -c \"dd if={i}boot_a of=/sdcard/boot.img bs=2048"], )
-                if process.returncode == 0:
-                    break
-            process = subprocess.run(["adb.exe", "pull", "/sdcard/boot.img", "./tmp/boot.img"])
-            if process.returncode != 0:
-                print_formatted_text(HTML(ERROR + "提取Boot失败"))
-                return 1
-            print_formatted_text(HTML(INFO + "请加载AnyKernel3 Zip"), style=style)
-            run("call sel file s .")
-            with open("./tmp/output.txt", "r", encoding="utf-8") as f:
-                filepath = f.read().rstrip("\r\n").rstrip("\n")
-                flash_anykernel3(filepath, "./tmp/boot.img")
-                flash_partation("./tmp/boot_patched.img", "boot_a")
-            print_formatted_text(HTML(INFO + "刷入成功"), style=style)
+        if result not in mapping:
+            print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
+            continue
 
-        case "3":
-            run("adb start-server 1>nul")
-            run("device_check.exe adb")
-            print_formatted_text("\n", style=style)
-            for i in paths:
-                process = subprocess.run(["adb.exe", "shell", f"su -c \"dd if={i}boot_b of=/sdcard/boot.img bs=2048"], )
-                if process.returncode == 0:
-                    break
-            process = subprocess.run(["adb.exe", "pull", "/sdcard/boot.img", "./tmp/boot.img"])
-            if process.returncode != 0:
-                print_formatted_text(HTML(ERROR + "提取Boot失败"))
-                return 1
-            print_formatted_text(HTML(INFO + "请加载AnyKernel3 Zip"), style=style)
-            run("call sel file s .")
-            with open("./tmp/output.txt", "r", encoding="utf-8") as f:
-                filepath = f.read().rstrip("\r\n").rstrip("\n")
-                flash_anykernel3(filepath, "./tmp/boot.img")
-                flash_partation("./tmp/boot_patched.img", "boot_b")
-            print_formatted_text(HTML(INFO + "刷入成功"), style=style)
-    anykernel3()
+        src_partition, dst_partition = mapping[result]
+        if not _extract_boot_to_tmp(paths, src_partition):
+            print_formatted_text(HTML(ERROR + "提取Boot失败"), style=style)
+            continue
+        print_formatted_text(HTML(INFO + "请加载AnyKernel3 Zip"), style=style)
+        run("call sel file s .")
+        with open("./tmp/output.txt", "r", encoding="utf-8") as f:
+            filepath = f.read().rstrip("\r\n").rstrip("\n")
+        flash_anykernel3(filepath, "./tmp/boot.img")
+        flash_partation("./tmp/boot_patched.img", dst_partition)
+        print_formatted_text(HTML(INFO + "刷入成功"), style=style)
 
 
 """ FEATURE MENU HANDLERS """
@@ -694,327 +599,318 @@ def anykernel3():
 @onerror
 @auto_clear(logo=True, end=True)
 def root():
-    if allow_xtc:
-        result = choose(
-            message="一键Root菜单",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "Wear一键Root"),
-                Option("2", "手机通用Root"),
-            ],
-            default="A"
-        )
-    else:
-        print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-        result = choose(
-            message="一键Root菜单",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("2", "手机通用Root"),
-            ],
-            default="A"
-        )
-    match result:
-        case "A":
-            return
-        case "1":
-            run("call root.bat")
-        case "2":
-            run("call otherroot.bat 3")
-    root()
+    while True:
+        if allow_xtc:
+            result = choose(
+                message="一键Root菜单",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "Wear一键Root"),
+                    Option("2", "手机通用Root"),
+                ],
+                default="A"
+            )
+        else:
+            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
+            result = choose(
+                message="一键Root菜单",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("2", "手机通用Root"),
+                ],
+                default="A"
+            )
+        match result:
+            case "A":
+                return
+            case "1":
+                run("call root.bat")
+            case "2":
+                run("call otherroot.bat 3")
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def appset():
-    if allow_xtc:
-        result = choose(
-            message="应用管理菜单",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "安装应用"),
-                Option("2", "卸载应用"),
-                Option("3", "安装状态栏悬浮窗"),
-                Option("4", "设置微信QQ为开机自启应用"),
-                Option("5", "解除z10 V2版本安装限制-V3不适用"),
-            ],
-            default="A"
-        )
-    else:
-        print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-        result = choose(
-            message="应用管理菜单",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "安装应用"),
-                Option("2", "卸载应用"),
-                Option("3", "安装状态栏悬浮窗"),
-                Option("4", "设置微信QQ为开机自启应用"),
-            ],
-            default="A"
-        )
-    if result == "A": return
-    if result == "1":
-        run("call userinstapp")
-    if result == "2":
-        run("call unapp")
-    if result == "3":
-        run("call xtcztl")
-    if result == "4":
-        run("call qqwxautestart")
-    if result == "5":
-        run("call z10openinst")
-    appset()
+    while True:
+        if allow_xtc:
+            result = choose(
+                message="应用管理菜单",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "安装应用"),
+                    Option("2", "卸载应用"),
+                    Option("3", "安装状态栏悬浮窗"),
+                    Option("4", "设置微信QQ为开机自启应用"),
+                    Option("5", "解除z10 V2版本安装限制-V3不适用"),
+                ],
+                default="A"
+            )
+        else:
+            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
+            result = choose(
+                message="应用管理菜单",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "安装应用"),
+                    Option("2", "卸载应用"),
+                    Option("3", "安装状态栏悬浮窗"),
+                    Option("4", "设置微信QQ为开机自启应用"),
+                ],
+                default="A"
+            )
+        if result == "A":
+            return
+        if result == "1":
+            run("call userinstapp")
+        if result == "2":
+            run("call unapp")
+        if result == "3":
+            run("call xtcztl")
+        if result == "4":
+            run("call qqwxautestart")
+        if result == "5":
+            run("call z10openinst")
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def userdebug():
-    if allow_xtc:
-        result = choose(
-            message="开发合集",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "设备信息"),
-                Option("2", "打开充电可用"),
-                Option("3", "型号与innermodel对照表"),
-                Option("4", "导入本地root文件"),
-                Option("5", "一键root[不刷userdata]"),
-                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
-                Option("7", "开机自刷Recovery"),
-                Option("8", "强制加好友[已失效]"),
-            ],
-            default="A"
-        )
-    else:
-        print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-        result = choose(
-            message="开发合集",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "设备信息"),
-                Option("2", "打开充电可用"),
-                Option("3", "型号与innermodel对照表"),
-                Option("4", "导入本地root文件"),
-                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
-                Option("7", "开机自刷Recovery"),
-            ],
-            default="A"
-        )
+    while True:
+        if allow_xtc:
+            result = choose(
+                message="Advanced Options",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "设备信息"),
+                    Option("2", "打开充电可用"),
+                    Option("3", "型号与innermodel对照表"),
+                    Option("4", "导入本地root文件"),
+                    Option("5", "一键root[不刷userdata]"),
+                    Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
+                    Option("7", "开机自刷Recovery"),
+                    Option("8", "强制加好友[已失效]"),
+                ],
+                default="A"
+            )
+        else:
+            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
+            result = choose(
+                message="Advanced Options",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "设备信息"),
+                    Option("2", "打开充电可用"),
+                    Option("3", "型号与innermodel对照表"),
+                    Option("4", "导入本地root文件"),
+                    Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
+                    Option("7", "开机自刷Recovery"),
+                ],
+                default="A"
+            )
 
-    if result == "A": return
-    if result == "1":
-        run("call listbuild")
-    if result == "2":
-        run("call opencharge")
-    if result == "3":
-        run("call innermodel")
-        print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
-        pause()
-    if result == "4":
-        run("call pashroot")
-    if result == "5":
-        run("call root nouserdata")
-    if result == "6":
-        run("call miscre")
-    if result == "7":
-        run("call pashtwrppro")
-    if result == "8":
-        run("call friend")
-    userdebug()
+        if result == "A":
+            return
+        if result == "1":
+            run("call listbuild")
+        if result == "2":
+            run("call opencharge")
+        if result == "3":
+            run("call innermodel")
+            print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
+            pause()
+        if result == "4":
+            run("call pashroot")
+        if result == "5":
+            run("call root nouserdata")
+        if result == "6":
+            run("call miscre")
+        if result == "7":
+            run("call pashtwrppro")
+        if result == "8":
+            run("call friend")
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def commonly():
-    commonly_list: List[Option] = [
-        Option("A", "返回上级菜单"),
-        Option("1", "ADB/自检校验码计算"),
-        Option("2", "离线OTA升级"),
-        Option("3", "刷入TWRP"),
-        Option("4", "刷入XTC Patch"),
-        Option("5", "备份与恢复"),
-        Option("6", "安卓8.1root后优化"),
-        Option("7", "进入qmmi[9008]"),
-        Option("8", "scrcpy投屏"),
-        Option("9", "高级重启"),
-        Option("11", "开启无线调试")
-    ]
-    if DEBUG: commonly_list.append(Option("10", "刷入AnyKernel3[实验性]"))
-    if allow_xtc:
+    while True:
+        commonly_list: List[Option] = [
+            Option("A", "返回上级菜单"),
+            Option("1", "ADB/自检校验码计算"),
+            Option("2", "离线OTA升级"),
+            Option("3", "刷入TWRP"),
+            Option("4", "刷入XTC Patch"),
+            Option("5", "备份与恢复"),
+            Option("6", "安卓8.1root后优化"),
+            Option("7", "进入qmmi[9008]"),
+            Option("8", "scrcpy投屏"),
+            Option("9", "高级重启"),
+            Option("11", "开启无线调试")
+        ]
+        if DEBUG:
+            commonly_list.append(Option("10", "刷入AnyKernel3[实验性]"))
+        if not allow_xtc:
+            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线ADB/自检校验码计算功能，敬请谅解"), style=style)
         result = choose(
             message="常用合集",
             options=commonly_list,
             default="A"
         )
-    else:
-        print_formatted_text(HTML(INFO + "由于版权原因，暂时下线ADB/自检校验码计算功能，敬请谅解"), style=style)
-        result = choose(
-            message="常用合集",
-            options=commonly_list,
-            default="A"
-        )
-    match result:
-        case "A": return
-        case "1":
-            run("powershell -ExecutionPolicy Bypass -File zj.ps1")
-        case "2":
-            run("call ota")
-        case "3":
-            run("call pashtwrp")
-        case "4":
-            run("call xtcpatch")
-        case "5":
-            run("call backup")
-        case "6":
-            run("call rootpro")
-        case "7":
-            run("call qmmi")
-            print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
-            pause()
-        case "8":
-            run("call scrcpy-ui.bat")
-        case "9":
-            run("call rebootpro")
-        case "10":
-            clear()
-            anykernel3()
-        case "11":
-            run("call wifiadb")
-        case _:
-            print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
-    commonly()
+        match result:
+            case "A":
+                return
+            case "1":
+                run("powershell -ExecutionPolicy Bypass -File zj.ps1")
+            case "2":
+                run("call ota")
+            case "3":
+                run("call pashtwrp")
+            case "4":
+                run("call xtcpatch")
+            case "5":
+                run("call backup")
+            case "6":
+                run("call rootpro")
+            case "7":
+                run("call qmmi")
+                print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
+                pause()
+            case "8":
+                run("call scrcpy-ui.bat")
+            case "9":
+                run("call rebootpro")
+            case "10":
+                clear()
+                anykernel3()
+            case "11":
+                run("call wifiadb")
+            case _:
+                print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def magisk():
-    result = choose(
-        message="magisk模块管理",
-        options=[
-            Option("A", "返回上级菜单"),
-            Option("1", "刷入Magisk模块"),
-            # Option("2", "刷入LSPosed-Android8.1机型"),
-            Option("3", "刷入Xposed框架-适用于安卓4.4.4和7.1.1"),
-        ],
-        default="A"
-    )
-    if result == "A": return
-    if result == "1":
-        run("call userinstmodule")
-    if result == "2":
-        run("call InstLSPosed810")
-    if result == "3":
-        run("call Xposed")
-    magisk()
+    while True:
+        result = choose(
+            message="magisk模块管理",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "刷入Magisk模块"),
+                # Option("2", "刷入LSPosed-Android8.1机型"),
+                Option("3", "刷入Xposed框架-适用于安卓4.4.4和7.1.1"),
+            ],
+            default="A"
+        )
+        if result == "A":
+            return
+        if result == "1":
+            run("call userinstmodule")
+        if result == "2":
+            run("call InstLSPosed810")
+        if result == "3":
+            run("call Xposed")
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def debug():
     global allow_xtc
-    result = choose(
-        message="DEBUG菜单",
-        options=[
-            Option("A", "返回上级菜单"),
-            Option("1", "色卡"),
-            Option("2", "调整为未使用状态"),
-            Option("3", "调整为使用状态"),
-            Option("4", "调整为更新状态"),
-            Option("5", "debug sel"),
-            Option("6", "切换环境 (release/userdebug)"),
-            Option("7", "允许使用部分一键root功能"),
-        ],
-        default="A"
-    )
-    match result:
-        case "A": return
-        case "1":
-            color()
-        case "2":
-            open("whoyou.txt", "w").write("1")
-        case "3":
-            open("whoyou.txt", "w").write("2")
-        case "4":
-            open("whoyou.txt", "w").write("3")
-        case "5":
-            sel()
-        case "6":
-            global BUILD_CONF_PATH, CURRENT_BUILD_META
-            if not BUILD_CONF_PATH:
-                print_formatted_text(HTML(ERROR + "未找到 build.conf，无法切换环境"), style=style)
+    if not DEBUG:
+        print_formatted_text(HTML(ERROR + "当前为 Release 构建，DEBUG 菜单不可用"), style=style)
+        time.sleep(1)
+        return
+    while True:
+        result = choose(
+            message="DEBUG菜单",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "色卡"),
+                Option("2", "调整为未使用状态"),
+                Option("3", "调整为使用状态"),
+                Option("4", "调整为更新状态"),
+                Option("5", "debug sel"),
+                Option("6", "允许使用部分一键root功能"),
+            ],
+            default="A"
+        )
+        match result:
+            case "A":
+                return
+            case "1":
+                color()
+            case "2":
+                open("whoyou.txt", "w").write("1")
+            case "3":
+                open("whoyou.txt", "w").write("2")
+            case "4":
+                open("whoyou.txt", "w").write("3")
+            case "5":
+                sel()
+            case "6":
+                allow_xtc = True
+                print_formatted_text(HTML(INFO + "已允许使用部分一键root功能"), style=style)
                 time.sleep(1)
-                return debug()
-            try:
-                target_env = toggle_environment(BUILD_CONF_PATH, CURRENT_BUILD_META)
-                print_formatted_text(HTML(INFO + f"已切换环境为: {target_env}"), style=style)
-            except Exception as exc:
-                print_formatted_text(HTML(ERROR + f"切换环境失败: {exc}"), style=style)
-            time.sleep(1)
-        case "7":
-            allow_xtc = True
-            print_formatted_text(HTML(INFO + "已允许使用部分一键root功能"), style=style)
-            time.sleep(1)
-    debug()
 
 
 @onerror
 @auto_clear(logo=True, end=True)
 def help_menu():
-    if allow_xtc:
-        result = choose(
-            message="帮助与链接",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "超级恢复文件下载"),
-                Option("2", "离线OTA下载"),
-                Option("3", "面具模块下载"),
-                Option("4", "APK下载"),
-                Option("5", "工具箱官网"),
-                Option("6", "开发文档"),
-                Option("7", "123云盘解除下载限制")
-            ],
-            default="A"
-        )
-    else:
-        result = choose(
-            message="帮助与链接",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("2", "离线OTA下载"),
-                Option("3", "面具模块下载"),
-                Option("5", "工具箱官网"),
-                Option("6", "开发文档"),
-                Option("7", "123云盘解除下载限制")
-            ],
-            default="A"
-        )
-    match result:
-        case "A": return
-        case "1":
-            run("start https://www.123865.com/s/Q5JfTd-hEbWH")
-        case "2":
-            run("start https://www.123865.com/s/Q5JfTd-HEbWH")
-        case "3":
-            run("start https://www.123684.com/s/Q5JfTd-cEbWH")
-        case "4":
-            run("start https://www.123684.com/s/Q5JfTd-ZEbWH")
-        case "5":
-            run("start https://atb.xgj.qzz.io")
-        case "6":
-            with open("开发文档.txt", "r", encoding="utf-8") as f:
-                doc = f.read()
-                print_formatted_text(HTML(doc), style=style)
-            kb = KeyBindings()
-            prompt(
-                HTML(INFO + "按任意键返回上级菜单"),
-                key_bindings=kb,
-                style=style
+    while True:
+        if allow_xtc:
+            result = choose(
+                message="帮助与链接",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("1", "超级恢复文件下载"),
+                    Option("2", "离线OTA下载"),
+                    Option("3", "面具模块下载"),
+                    Option("4", "APK下载"),
+                    Option("5", "工具箱官网"),
+                    Option("6", "开发文档"),
+                    Option("7", "123云盘解除下载限制")
+                ],
+                default="A"
             )
-        case "7":
-            run("call patch123")
-
-    help_menu()
+        else:
+            result = choose(
+                message="帮助与链接",
+                options=[
+                    Option("A", "返回上级菜单"),
+                    Option("2", "离线OTA下载"),
+                    Option("3", "面具模块下载"),
+                    Option("5", "工具箱官网"),
+                    Option("6", "开发文档"),
+                    Option("7", "123云盘解除下载限制")
+                ],
+                default="A"
+            )
+        match result:
+            case "A":
+                return
+            case "1":
+                run("start https://www.123865.com/s/Q5JfTd-hEbWH")
+            case "2":
+                run("start https://www.123865.com/s/Q5JfTd-HEbWH")
+            case "3":
+                run("start https://www.123684.com/s/Q5JfTd-cEbWH")
+            case "4":
+                run("start https://www.123684.com/s/Q5JfTd-ZEbWH")
+            case "5":
+                run("start https://atb.xgj.qzz.io")
+            case "6":
+                with open("开发文档.txt", "r", encoding="utf-8") as f:
+                    doc = f.read()
+                    print_formatted_text(HTML(doc), style=style)
+                kb = KeyBindings()
+                prompt(
+                    HTML(INFO + "按任意键返回上级菜单"),
+                    key_bindings=kb,
+                    style=style
+                )
+            case "7":
+                run("call patch123")
 
 
 """ MOD MANAGEMENT FUNCTIONS """ 
@@ -1062,27 +958,27 @@ def run_mod_main(modname):
 @onerror
 @auto_clear(logo=True, end=True)
 def mod():
-    result = choose(
-        message="扩展管理",
-        options=[
-            Option("A", "返回上级菜单"),
-            Option("1", "运行已安装扩展"),
-            Option("2", "安装扩展"),
-            Option("3", "卸载扩展"),
-        ],
-        default="A"
-    )
-    if result == "A": return
-    if result == "1":
-        modname = load_mod_menu()
-        if modname:
-            run_mod_main(modname)
-    if result == "2":
-        run("call mod")
-    if result == "3":
-        run("call unmod")
-
-    mod()
+    while True:
+        result = choose(
+            message="扩展管理",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "运行已安装扩展"),
+                Option("2", "安装扩展"),
+                Option("3", "卸载扩展"),
+            ],
+            default="A"
+        )
+        if result == "A":
+            return
+        if result == "1":
+            modname = load_mod_menu()
+            if modname:
+                run_mod_main(modname)
+        if result == "2":
+            run("call mod")
+        if result == "3":
+            run("call unmod")
 
 
 """ MAIN FLOW FUNCTIONS """
@@ -1145,7 +1041,7 @@ def pre_main() -> bool:
     global flag
     global logger
     global DEBUG
-    global BUILD_CONF_PATH, CURRENT_BUILD_META
+    global CURRENT_BUILD_META
     run("@echo off & setlocal enabledelayedexpansion")
     colorama.init(autoreset=True)
     run("call .\\color.bat")
@@ -1211,15 +1107,12 @@ def pre_main() -> bool:
     if os.getenv("ATB_SKIP_UPDATE", "0") != "1":
         print_formatted_text(HTML(INFO + "正在检查更新..."), style=style)
         try:
-            meta_update, meta_found_update, conf_path_update = load_build_metadata()
-            if meta_found_update:
-                BUILD_CONF_PATH = conf_path_update
-                CURRENT_BUILD_META = meta_update
-            is_userdebug = meta_update.get("ro.build.type") == "userdebug"
+            meta_update = CURRENT_BUILD_META
+            is_debug_build = DEBUG
             base = "https://raw.githubusercontent.com/xgj236/AllToolBox/main"
             utc_url = f"{base}/utctmp.txt"
             version_tmp_url = f"{base}/versiontmp.txt"
-            if is_userdebug:
+            if is_debug_build:
                 utc_url = f"{base}/betautctmp.txt"
                 version_tmp_url = f"{base}/betaversiontmp.txt"
 
@@ -1272,11 +1165,9 @@ def pre_main() -> bool:
         run("call upall.bat run")
 
     try:
-        if CURRENT_BUILD_META.get("persist.xtc_allow_lock_True") == "True":
+        if str(CURRENT_BUILD_META.get("persist.atb.xtc.allow", "")).lower() in ("true", "1", "yes", "y"):
             allow_xtc = True
-        elif str(CURRENT_BUILD_META.get("persist.atb.xtc.allow", "")).lower() in ("true", "1", "yes", "y"):
-            allow_xtc = True
-        elif debug_features_allowed(CURRENT_BUILD_META):
+        elif debug_features_allowed():
             allow_xtc = True
         else:
             try:
@@ -1311,12 +1202,12 @@ def pre_main() -> bool:
         if os_vercode <= 7:
             print_formatted_text(HTML(ERROR + "此脚本需要 Windows 8 或更高版本"), style=style)
             pause()
-            return 1
+            return False
         print_formatted_text(HTML(INFO + f"当前系统: {os_name} {os_release}"), style=style)
         adb_process = subprocess.Popen(["adb.exe", "version"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=True)
         adb_process.wait()
         if adb_process.returncode != 0:
-            print_formatted_text(HTML(ERROR + "ADB检查失败，返回值：", str(adb_process.returncode)), style=style)
+            print_formatted_text(HTML(ERROR + f"ADB检查失败，返回值：{adb_process.returncode}"), style=style)
             return False
         print_formatted_text(HTML(INFO + "检查ADB命令成功"), style=style)
     whoyou = open("whoyou.txt", "w", encoding="gbk")
@@ -1350,28 +1241,31 @@ def cleanup(code: int = 0):
 
 @onerror
 def main() -> int:
-    # do
     global flag
     global key
-    global style
-    global BUILD_CONF_PATH
-    global CURRENT_BUILD_META
-    build_meta, meta_found, conf_path = load_build_metadata()
-    BUILD_CONF_PATH = conf_path
-    CURRENT_BUILD_META = build_meta
-    debug_allowed = debug_features_allowed(build_meta) if meta_found else True
+    debug_allowed = debug_features_allowed()
     try:
-        if not meta_found:
-            logger.warning("BUILD.CONF 丢失")
-
-        def handle_action(action: str) -> None:
-            match action:
-                case "root":
-                    clear()
-                    run("call root.bat")
-                    clear()
+        # Start interactive (UI/menu) flow. Run pre-main checks once.
+        pre_ok = pre_main() if not flag else True
+        if not pre_ok:
+            return 1
+        while True:
+            clear()
+            run("call logo")
+            result = menu()
+            match result:
+                case "SHIFT_D":
+                    if debug_allowed:
+                        debug()
+                    else:
+                        print_formatted_text(HTML(ERROR + "当前为 Release 构建，DEBUG 功能已禁用"), style=style)
+                        time.sleep(1)
+                case "onekeyroot":
+                    root()
                 case "openshell":
-                    auto_clear(lambda: subprocess.run(["cmd.exe", "/k"], shell=True), end=True)
+                    clear()
+                    subprocess.run(["cmd.exe", "/k"], shell=True)
+                    clear()
                 case "about":
                     about()
                 case "mods":
@@ -1386,58 +1280,14 @@ def main() -> int:
                     magisk()
                 case "help-links":
                     help_menu()
+                case "exit":
+                    return 0
                 case _:
-                    pass
-
-        # Start interactive (UI/menu) flow. Run pre-main checks once.
-        pre_ok = pre_main() if not flag else True
-        if not pre_ok:
-            return 1
-        clear()
-        run("call logo")
-
-        result = menu()
-        match result:
-            case "SHIFT_D":
-                if debug_allowed:
-                    debug()
-                else:
-                    return main()  # loop
-            case "onekeyroot":
-                root()
-            case "openshell":
-                clear()
-                subprocess.run(["cmd.exe", "/k"], shell=True)
-                clear()
-            case "about":
-                about()
-            case "mods":
-                mod()
-            case "commonly":
-                commonly()
-            case "user-debug":
-                userdebug()
-            case "man-apps":
-                appset()
-            case "magisk-mod":
-                magisk()
-            case "help-links":
-                help_menu()
-            case "exit":
-                return 0
-        main()  # loop
+                    continue
 
     except KeyboardInterrupt:
-        if key:
-            print_formatted_text(HTML("\n" + WARN + "检测到用户中断，正在退出..."), style=style)
-            return 0
-        else:
-            if not flag:
-                print_formatted_text(HTML("\n" + WARN + "检测到用户中断，正在退出..."), style=style)
-                return 0
-            key = True
-            clear()
-            main()
+        print_formatted_text(HTML("\n" + WARN + "检测到用户中断，正在退出..."), style=style)
+        return 0
 
 
 if __name__ == "__main__":
