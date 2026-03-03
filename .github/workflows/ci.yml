@@ -1,0 +1,255 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint + Unit Test
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pylint
+
+      - name: Run pylint (score must be > 5.5)
+        shell: pwsh
+        run: |
+          $files = git ls-files '*.py'
+          if (-not $files) {
+            throw "No Python files found for pylint."
+          }
+          python -m pylint --fail-under=5.5 $files
+
+      - name: Run unit tests (only test/test_main.py)
+        shell: pwsh
+        run: |
+          python test/test_main.py
+
+  build-on-windows10:
+    name: Build Matrix (Windows 10 / windows-2019)
+    runs-on: windows-2019
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup MinGW (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build all modes and print build.log every run
+        shell: pwsh
+        env:
+          MINGW64_BIN: C:\msys64\mingw64\bin
+        run: |
+          $modes = @(
+            @{ Name = "pyinstaller+g++"; Args = @("--pyinstaller", "--mingw") },
+            @{ Name = "pyinstaller+msvc"; Args = @("--pyinstaller", "--msvc") },
+            @{ Name = "nuitka+g++"; Args = @("--nuitka", "mingw", "--mingw") },
+            @{ Name = "nuitka+msvc"; Args = @("--nuitka", "msvc", "--msvc") }
+          )
+
+          $failed = @()
+          foreach ($mode in $modes) {
+            Write-Host ""
+            Write-Host "========== BUILD MODE: $($mode.Name) =========="
+
+            if (Test-Path build) {
+              Remove-Item -Recurse -Force build
+            }
+            New-Item -ItemType Directory -Path build | Out-Null
+
+            & python build.py -t release --platform win64 @($mode.Args)
+            $exitCode = $LASTEXITCODE
+
+            Write-Host "--- build/build.log ($($mode.Name)) ---"
+            if (Test-Path build/build.log) {
+              Get-Content build/build.log
+            } else {
+              Write-Host "build/build.log not found"
+            }
+            Write-Host "--- end build/build.log ($($mode.Name)) ---"
+
+            if ($exitCode -eq 0) {
+              $required = @(
+                "build/main/bin/run_cmd.exe",
+                "build/main/bin/main.exe",
+                "build/main/bin/repair.exe",
+                "build/main/bin/menu.exe"
+              )
+              $missing = @()
+              foreach ($item in $required) {
+                if (-not (Test-Path $item)) {
+                  $missing += $item
+                }
+              }
+              if ($missing.Count -gt 0) {
+                Write-Host "Output verification failed for $($mode.Name). Missing: $($missing -join ', ')"
+                $failed += "$($mode.Name) (missing outputs)"
+              } else {
+                Write-Host "Output verification passed for $($mode.Name)"
+              }
+            } else {
+              Write-Host "Build command failed for $($mode.Name) with exit code $exitCode"
+              $failed += "$($mode.Name) (exit=$exitCode)"
+            }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Host ""
+            Write-Host "FAILED MODES:"
+            $failed | ForEach-Object { Write-Host " - $_" }
+            throw "One or more build modes failed."
+          }
+
+  build-on-windows-latest:
+    name: Build Matrix (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Setup MinGW (MSYS2)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build all modes and print build.log every run
+        shell: pwsh
+        env:
+          MINGW64_BIN: C:\msys64\mingw64\bin
+        run: |
+          $modes = @(
+            @{ Name = "pyinstaller+g++"; Args = @("--pyinstaller", "--mingw") },
+            @{ Name = "pyinstaller+msvc"; Args = @("--pyinstaller", "--msvc") },
+            @{ Name = "nuitka+g++"; Args = @("--nuitka", "mingw", "--mingw") },
+            @{ Name = "nuitka+msvc"; Args = @("--nuitka", "msvc", "--msvc") }
+          )
+
+          $failed = @()
+          foreach ($mode in $modes) {
+            Write-Host ""
+            Write-Host "========== BUILD MODE: $($mode.Name) =========="
+
+            if (Test-Path build) {
+              Remove-Item -Recurse -Force build
+            }
+            New-Item -ItemType Directory -Path build | Out-Null
+
+            & python build.py -t release --platform win64 @($mode.Args)
+            $exitCode = $LASTEXITCODE
+
+            Write-Host "--- build/build.log ($($mode.Name)) ---"
+            if (Test-Path build/build.log) {
+              Get-Content build/build.log
+            } else {
+              Write-Host "build/build.log not found"
+            }
+            Write-Host "--- end build/build.log ($($mode.Name)) ---"
+
+            if ($exitCode -eq 0) {
+              $required = @(
+                "build/main/bin/run_cmd.exe",
+                "build/main/bin/main.exe",
+                "build/main/bin/repair.exe",
+                "build/main/bin/menu.exe"
+              )
+              $missing = @()
+              foreach ($item in $required) {
+                if (-not (Test-Path $item)) {
+                  $missing += $item
+                }
+              }
+              if ($missing.Count -gt 0) {
+                Write-Host "Output verification failed for $($mode.Name). Missing: $($missing -join ', ')"
+                $failed += "$($mode.Name) (missing outputs)"
+              } else {
+                Write-Host "Output verification passed for $($mode.Name)"
+              }
+            } else {
+              Write-Host "Build command failed for $($mode.Name) with exit code $exitCode"
+              $failed += "$($mode.Name) (exit=$exitCode)"
+            }
+          }
+
+          if ($failed.Count -gt 0) {
+            Write-Host ""
+            Write-Host "FAILED MODES:"
+            $failed | ForEach-Object { Write-Host " - $_" }
+            throw "One or more build modes failed."
+          }
