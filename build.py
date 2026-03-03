@@ -485,7 +485,7 @@ def download_dependency():
         with open("binary_link.txt", "r") as f:
             url = f.read().strip()
     else:
-        url_response = requests.get("https://atb.xgj.qzz.io/other/binary_link.txt")
+        url_response = requests.get("https://atb.xgj.qzz.io/other/binary_link.txt", headers={"User-Agent":"pan.baidu.com"})
         url = url_response.text.strip()
     custom_write(f"Downloading bin.7z from {url} ...")
     response = requests.get(url, stream=True)

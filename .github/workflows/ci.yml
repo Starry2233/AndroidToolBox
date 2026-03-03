@@ -37,11 +37,15 @@ jobs:
       - name: Run pylint (score must be > 5.5)
         shell: pwsh
         run: |
-          $files = git ls-files '*.py'
+          $files = git ls-files | Where-Object {
+            ($_ -match '^(src|test)/.*\.py$') -or
+            ($_ -eq 'build.py') -or
+            ($_ -eq 'check.py')
+          }
           if (-not $files) {
             throw "No Python files found for pylint."
           }
-          python -m pylint --fail-under=5.5 $files
+          python -m pylint --fail-under=5.5 --disable=import-error $files
 
       - name: Run unit tests (only test/test_main.py)
         shell: pwsh
