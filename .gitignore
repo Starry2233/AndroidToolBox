@@ -38,3 +38,6 @@ docs/.vitepress/cache
 /flutter
 .qwen/
 .iflow/
+versiontmp.txt
+bugversion.txt
+.gitignore
