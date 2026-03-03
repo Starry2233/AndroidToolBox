@@ -34,6 +34,10 @@ import requests
 import filehash
 import json
 import traceback
+import locale
+import threading
+import uuid
+import atexit
 import pluginutils, pluginutils.load, pluginutils.manage
 
 try:
@@ -80,6 +84,7 @@ started = False
 _RUN_ENV_READY = False
 _RUN_ENV_CACHE: Optional[Dict[str, str]] = None
 _PATHEXT_EXTRA = [".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".VBE", ".JS", ".JSE", ".WSF", ".WSH", ".MSC"]
+_RUN_SHELL: Optional["PersistentCmdShell"] = None
 
 
 def _normalize_build_type(value: str) -> str:
@@ -174,26 +179,145 @@ def _build_run_env() -> Dict[str, str]:
     return env
 
 
-def _ensure_run_initialized() -> Dict[str, str]:
+class PersistentCmdShell:
+    def __init__(self, env: Dict[str, str]):
+        self._encoding = locale.getpreferredencoding(False) or "utf-8"
+        self._lock = threading.Lock()
+        self._proc = subprocess.Popen(
+            ["cmd.exe", "/d", "/q", "/v:on"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding=self._encoding,
+            errors="replace",
+            env=env,
+        )
+        self._initialize_shell()
+
+    def _initialize_shell(self) -> None:
+        # One-time shell setup.
+        self._write_line("@echo off")
+        if os.path.isfile(".\\color.bat"):
+            self._write_line("call .\\color.bat 1>nul 2>nul")
+        self._flush_stdin()
+
+    def _write_line(self, line: str) -> None:
+        if not self._proc.stdin:
+            raise RuntimeError("Persistent cmd stdin is unavailable")
+        self._proc.stdin.write(line + "\n")
+
+    def _flush_stdin(self) -> None:
+        if not self._proc.stdin:
+            raise RuntimeError("Persistent cmd stdin is unavailable")
+        self._proc.stdin.flush()
+
+    def is_alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                if self.is_alive():
+                    self._write_line("exit")
+                    self._flush_stdin()
+                    self._proc.wait(timeout=1)
+            except Exception:
+                pass
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                if self._proc.stdout:
+                    self._proc.stdout.close()
+            except Exception:
+                pass
+
+    def run_command(self, command: str, extra_env: Optional[Dict[str, str]] = None, capture_output: bool = False) -> subprocess.CompletedProcess:
+        if not self.is_alive():
+            raise RuntimeError("Persistent cmd process has exited")
+
+        token = uuid.uuid4().hex.upper()
+        begin_marker = f"__ATB_BEGIN_{token}__"
+        end_marker = f"__ATB_END_{token}__"
+        rc_prefix = f"__ATB_RC_{token}="
+
+        output_lines: List[str] = []
+        rc = 0
+        in_payload = False
+
+        with self._lock:
+            self._write_line("@echo off")
+            if extra_env:
+                for k, v in extra_env.items():
+                    key = str(k)
+                    value = str(v)
+                    self._write_line(f'set "{key}={value}"')
+
+            self._write_line(f"echo {begin_marker}")
+            self._write_line(command)
+            self._write_line(f"echo {rc_prefix}!ERRORLEVEL!")
+            self._write_line(f"echo {end_marker}")
+            self._flush_stdin()
+
+            if not self._proc.stdout:
+                raise RuntimeError("Persistent cmd stdout is unavailable")
+
+            while True:
+                line = self._proc.stdout.readline()
+                if line == "":
+                    raise RuntimeError("Persistent cmd stdout closed unexpectedly")
+
+                clean = line.rstrip("\r\n")
+                if clean == begin_marker:
+                    in_payload = True
+                    continue
+                if clean == end_marker:
+                    break
+                if clean.startswith(rc_prefix):
+                    try:
+                        rc = int(clean.split("=", 1)[1].strip())
+                    except Exception:
+                        rc = 1
+                    continue
+
+                if in_payload:
+                    output_lines.append(clean)
+                    if not capture_output:
+                        print(clean)
+
+        stdout_text = "\n".join(output_lines) if capture_output else None
+        return subprocess.CompletedProcess(args=command, returncode=rc, stdout=stdout_text, stderr=None)
+
+
+def _ensure_run_initialized() -> PersistentCmdShell:
     global _RUN_ENV_READY
     global _RUN_ENV_CACHE
+    global _RUN_SHELL
 
     if _RUN_ENV_CACHE is None:
         _RUN_ENV_CACHE = _build_run_env()
 
     if not _RUN_ENV_READY:
-        if os.path.isfile(".\\color.bat"):
-            try:
-                subprocess.run(
-                    ["cmd.exe", "/d", "/c", "call .\\color.bat"],
-                    env=_RUN_ENV_CACHE,
-                    check=False,
-                )
-            except Exception:
-                logger.exception("Failed to initialize color environment")
+        _RUN_SHELL = PersistentCmdShell(_RUN_ENV_CACHE)
         _RUN_ENV_READY = True
 
-    return _RUN_ENV_CACHE.copy()
+        def _close_shell_on_exit() -> None:
+            global _RUN_SHELL
+            try:
+                if _RUN_SHELL is not None:
+                    _RUN_SHELL.close()
+            finally:
+                _RUN_SHELL = None
+
+        atexit.register(_close_shell_on_exit)
+
+    if _RUN_SHELL is None or not _RUN_SHELL.is_alive():
+        _RUN_SHELL = PersistentCmdShell(_RUN_ENV_CACHE)
+
+    return _RUN_SHELL
 
 
 def run(
@@ -203,24 +327,17 @@ def run(
     capture_output: bool = False,
     check: bool = False,
 ) -> subprocess.CompletedProcess:
-    env = _ensure_run_initialized()
-    if extra_env:
-        env.update({str(k): str(v) for k, v in extra_env.items()})
-
-    # 保证每次执行都包含@echo off，无论cmd内容如何
-    if "@echo off" not in cmd.lower():
-        batch = "@echo off & " + f"{cmd} & " + "exit /b !ERRORLEVEL!"
-    else:
-        batch = f"{cmd} & exit /b !ERRORLEVEL!"
-
-    return subprocess.run(
-        ["cmd.exe", "/v:on", "/c", batch],
-        env=env,
-        capture_output=capture_output,
-        text=capture_output,
-        errors="replace" if capture_output else None,
-        check=check,
-    )
+    shell = _ensure_run_initialized()
+    merged_env = {str(k): str(v) for k, v in (extra_env or {}).items()}
+    result = shell.run_command(cmd, extra_env=merged_env if merged_env else None, capture_output=capture_output)
+    if check and result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            returncode=result.returncode,
+            cmd=cmd,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return result
 
 
 def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
