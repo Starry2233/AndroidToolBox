@@ -894,6 +894,8 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
     gradle_bar = GradleProgressBar(total_tasks, thread_capacity=max_threads, display=DISPLAY)
     global CURRENT_BAR
     CURRENT_BAR = gradle_bar
+    launcher_exe_path = "./build/main/launcher.exe"
+    launcher_alias_path = "./build/main/双击运行.exe"
 
     if not builder:
         custom_write("Generating ICON Source")
@@ -908,13 +910,13 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
         gradle_bar.start_task(":build-launcher")
         run_step(
             [gxx, "-static", "./src/launch.cpp", "./build/icon.o", "-municode",
-            "-o", "build/main/双击运行.exe".encode("utf-8"),
+            "-o", launcher_exe_path,
             "-finput-charset=UTF-8", "-fexec-charset=GBK",
             "-lstdc++", "-lpthread", "-O3", gxx_arch_flag],
             None  # No progress bar for this step since we're using gradle_bar
         ) if profile == 0 else run_step(
             [gxx, "-Wall", "-static", "./src/launch.cpp", "./build/icon.o", "-municode",
-            "-o", "build/main/双击运行.exe".encode("utf-8"),
+            "-o", launcher_exe_path,
             "-finput-charset=UTF-8", "-fexec-charset=GBK",
             "-lstdc++", "-lpthread", "-Og", gxx_arch_flag],
             None  # No progress bar for this step since we're using gradle_bar
@@ -966,13 +968,20 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
         for lp in lib_parts:
             lib_flags.append(f"/LIBPATH:{lp}")
         run_step(
-            [cl_path, "/MT", "/EHsc", "/Fobuild/launch.obj", "src\\launch.cpp", ".\\build\\icon.obj", "/source-charset:utf-8", "/execution-charset:gbk", "/Fe:build\\main\\双击运行.exe", "/O2", "/link", f"/MACHINE:{msvc_machine}", *lib_flags, "advapi32.lib", "user32.lib", "shell32.lib"],
+            [cl_path, "/MT", "/EHsc", "/Fobuild/launch.obj", "src\\launch.cpp", ".\\build\\icon.obj", "/source-charset:utf-8", "/execution-charset:gbk", "/Fe:build\\main\\launcher.exe", "/O2", "/link", f"/MACHINE:{msvc_machine}", *lib_flags, "advapi32.lib", "user32.lib", "shell32.lib"],
             None  # No progress bar for this step since we're using gradle_bar
         ) if profile == 0 else run_step(
-            [cl_path, "/MTd", "/EHsc", "/DEBUG", "/Zi", "/Fobuild/launch.obj", "/Fdbuild/main/双击运行.pdb", "src\\launch.cpp", "build\\icon.obj", "/source-charset:utf-8", "/execution-charset:gbk", "/Fe:build\\main\\双击运行.exe", "/Od", "/link", f"/MACHINE:{msvc_machine}", *lib_flags, "advapi32.lib", "user32.lib", "shell32.lib"],
+            [cl_path, "/MTd", "/EHsc", "/DEBUG", "/Zi", "/Fobuild/launch.obj", "/Fdbuild/main/launcher.pdb", "src\\launch.cpp", "build\\icon.obj", "/source-charset:utf-8", "/execution-charset:gbk", "/Fe:build\\main\\launcher.exe", "/Od", "/link", f"/MACHINE:{msvc_machine}", *lib_flags, "advapi32.lib", "user32.lib", "shell32.lib"],
             None  # No progress bar for this step since we're using gradle_bar
         )
         gradle_bar.complete_task(":build-launcher")
+
+    # Keep historical Chinese filename as a best-effort alias.
+    try:
+        if os.path.isfile(launcher_exe_path):
+            shutil.copy2(launcher_exe_path, launcher_alias_path)
+    except Exception as e:
+        custom_write(f"Warning: Failed to create launcher alias {launcher_alias_path}: {e}")
 
     custom_write("Installing build requirements")
     gradle_bar.start_task(":install-requirements")
