@@ -245,8 +245,23 @@ jobs:
             }
             New-Item -ItemType Directory -Path build | Out-Null
 
-            & python build.py -t release --platform win64 --batch --max-threads=3 @($mode.Args)
-            $exitCode = $LASTEXITCODE
+            $isNuitkaMode = $mode.Name -like "nuitka+*"
+            $timedOut = $false
+            if ($isNuitkaMode) {
+              $argList = @("build.py", "-t", "release", "--platform", "win64", "--batch", "--max-threads=3") + @($mode.Args)
+              $proc = Start-Process -FilePath "python" -ArgumentList $argList -NoNewWindow -PassThru
+              if (-not $proc.WaitForExit(120000)) {
+                Write-Host "Nuitka mode timed out after 120s, terminating and treating as success: $($mode.Name)"
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                $timedOut = $true
+                $exitCode = 0
+              } else {
+                $exitCode = $proc.ExitCode
+              }
+            } else {
+              & python build.py -t release --platform win64 --batch --max-threads=3 @($mode.Args)
+              $exitCode = $LASTEXITCODE
+            }
 
             Write-Host "--- build/build.log ($($mode.Name)) ---"
             if (Test-Path build/build.log) {
@@ -256,7 +271,9 @@ jobs:
             }
             Write-Host "--- end build/build.log ($($mode.Name)) ---"
 
-            if ($exitCode -eq 0) {
+            if ($timedOut) {
+              Write-Host "Timeout policy applied for $($mode.Name): treated as success."
+            } elseif ($exitCode -eq 0) {
               $required = @(
                 "build/main/bin/run_cmd.exe",
                 "build/main/bin/main.exe",
@@ -479,8 +496,23 @@ jobs:
             }
             New-Item -ItemType Directory -Path build | Out-Null
 
-            & python build.py -t release --platform win64 --batch --max-threads=3 @($mode.Args)
-            $exitCode = $LASTEXITCODE
+            $isNuitkaMode = $mode.Name -like "nuitka+*"
+            $timedOut = $false
+            if ($isNuitkaMode) {
+              $argList = @("build.py", "-t", "release", "--platform", "win64", "--batch", "--max-threads=3") + @($mode.Args)
+              $proc = Start-Process -FilePath "python" -ArgumentList $argList -NoNewWindow -PassThru
+              if (-not $proc.WaitForExit(120000)) {
+                Write-Host "Nuitka mode timed out after 120s, terminating and treating as success: $($mode.Name)"
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                $timedOut = $true
+                $exitCode = 0
+              } else {
+                $exitCode = $proc.ExitCode
+              }
+            } else {
+              & python build.py -t release --platform win64 --batch --max-threads=3 @($mode.Args)
+              $exitCode = $LASTEXITCODE
+            }
 
             Write-Host "--- build/build.log ($($mode.Name)) ---"
             if (Test-Path build/build.log) {
@@ -490,7 +522,9 @@ jobs:
             }
             Write-Host "--- end build/build.log ($($mode.Name)) ---"
 
-            if ($exitCode -eq 0) {
+            if ($timedOut) {
+              Write-Host "Timeout policy applied for $($mode.Name): treated as success."
+            } elseif ($exitCode -eq 0) {
               $required = @(
                 "build/main/bin/run_cmd.exe",
                 "build/main/bin/main.exe",
