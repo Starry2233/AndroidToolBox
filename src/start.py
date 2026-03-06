@@ -454,7 +454,11 @@ def run(
                     env_for_run = (_RUN_ENV_CACHE.copy() if _RUN_ENV_CACHE else os.environ.copy())
                     env_for_run.update(merged_env)
                     try:
-                        ret = subprocess.run(["cmd.exe", "/c", cmd], env=env_for_run, shell=False)
+                        cmd_to_run = cmd
+                        # Ensure @echo off is present so the batch doesn't echo commands
+                        if not cmd_to_run.strip().lower().startswith("@echo off"):
+                            cmd_to_run = f"@echo off & {cmd_to_run}"
+                        ret = subprocess.run(["cmd.exe", "/c", cmd_to_run], env=env_for_run, shell=False)
                         return subprocess.CompletedProcess(args=cmd, returncode=ret.returncode, stdout=None, stderr=None)
                     except Exception:
                         # 如果以交互方式运行失败，则继续使用持久 shell
