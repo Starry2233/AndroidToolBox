@@ -401,7 +401,7 @@ def run(
 ):
     """
     TODO: Persistent Shell
-
+    """
     global _RUN_SHELL
     global _RUN_ENV_CACHE
 
@@ -495,6 +495,7 @@ def run(
                     @{cmd} &
                     endlocal 1>nul 2>nul &
                     '''.replace("\n", "").replace(20*" ", "")])
+    """
 
 
 def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
@@ -1030,23 +1031,23 @@ def userdebug():
         if result == "A":
             return
         if result == "1":
-            run("call listbuild")
+            run("call listbuild"); clear();run("call logo")
         if result == "2":
-            run("call opencharge")
+            run("call opencharge"); clear();run("call logo")
         if result == "3":
             run("call innermodel")
             print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
-            pause()
+            pause(); clear();run("call logo")
         if result == "4":
-            run("call pashroot")
+            run("call pashroot"); clear();run("call logo")
         if result == "5":
-            run("call root nouserdata")
+            run("call root nouserdata"); clear();run("call logo")
         if result == "6":
-            run("call miscre")
+            run("call miscre"); clear();run("call logo")
         if result == "7":
-            run("call pashtwrppro")
+            run("call pashtwrppro"); clear();run("call logo")
         if result == "8":
-            run("call friend")
+            run("call friend"); clear();run("call logo")
 
 
 @onerror
@@ -1124,11 +1125,11 @@ def magisk():
         if result == "A":
             return
         if result == "1":
-            run("call userinstmodule")
+            run("call userinstmodule"); clear();run("call logo")
         if result == "2":
-            run("call InstLSPosed810")
+            run("call InstLSPosed810"); clear();run("call logo")
         if result == "3":
-            run("call Xposed")
+            run("call Xposed"); clear();run("call logo")
 
 
 @onerror
@@ -1472,7 +1473,7 @@ def pre_main() -> bool:
             pass
         run("call upall.bat run")
 
-    allow_xtc = True
+    """allow_xtc = True"""
 
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
         print_formatted_text(HTML(INFO + "正在检查Windows属性..."), style=style)
