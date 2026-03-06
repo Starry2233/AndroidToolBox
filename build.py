@@ -568,7 +568,7 @@ def run_python_compilation_task(cmd, src_script, exe_name, bar):
 
 
 @onerror
-def main(python_builder: int, profile: int, bmode: str, platform: str, builder: int, winsdk_dir: str | None, winsdk_include: str | None, mingw_bin_override: str | None, msvc_bin_override: str | None, msvc_include_override: str | None, meta_inputs: dict[str, str | None], max_threads: int = 4):
+def main(python_builder: int, profile: int, bmode: str, platform: str, builder: int, winsdk_dir: str | None, winsdk_include: str | None, mingw_bin_override: str | None, msvc_bin_override: str | None, msvc_include_override: str | None, meta_inputs: dict[str, str | None], max_threads: int = 4, batch: bool = False):
     # reset log file
     os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
     with open(LOG_PATH, "w", encoding="utf-8") as _f:
@@ -862,7 +862,9 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
 
     # Initialize display manager and progress bar
     global DISPLAY
-    DISPLAY = DisplayManager()
+    DISPLAY = None if batch else DisplayManager()
+    if batch:
+        custom_write("Batch mode enabled: progress UI disabled, logging only.")
 
     # Calculate total tasks dynamically based on build configuration
     total_tasks = 0
@@ -1018,6 +1020,8 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
 
     if python_builder == 1:
         custom_write("Preparing Nuitka")
+        # CI/non-interactive safety: avoid blocking on first-time dependency downloads.
+        os.environ["NUITKA_ASSUME_YES_FOR_DOWNLOADS"] = "1"
         gcc = os.path.dirname(
             subprocess.run(
                 ["cmd", "/c", "where", "gcc.exe"],
@@ -1043,16 +1047,19 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
 
         # Prepare commands based on profile
         commands = []
+        nuitka_non_interactive_flags = ["--assume-yes-for-downloads"]
         for src_script, exe_name in python_scripts:
             if profile == 0:  # Release build
                 cmd = [python_exe, "-m", "nuitka",
                        "--onefile", "--lto=yes", "--python-flag=-OO", "--remove-output",
+                       *nuitka_non_interactive_flags,
                        "--output-dir=./build/py/dist",
                        "--nofollow-import-to=debughook,debugpy,pydevd,pdb,unittest,pytest,test",
                        f"src/{src_script}", nuitka_compiler_flag]
             else:  # Debug build
                 cmd = [python_exe, "-m", "nuitka",
-                       "--onefile", "--lto=no", "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
+                       "--onefile", "--lto=no", *nuitka_non_interactive_flags,
+                       "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
                        f"src/{src_script}", nuitka_compiler_flag]
             commands.append((cmd, src_script, exe_name))
 
@@ -1397,6 +1404,11 @@ if __name__ == "__main__":
         default=4,
         help="Maximum number of threads to use for compilation (default: 4)"
     )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Disable progress UI and output logs only (recommended for CI)"
+    )
 
     parser.add_argument("--ro-build-type", type=str, default=None, help="Deprecated: ignored. Build type is locked by -t")
     parser.add_argument("--ro-build-version", type=str, default=None, help="Value for ro.build.version")
@@ -1446,7 +1458,7 @@ if __name__ == "__main__":
 
     ret = 1
     try:
-        ret = main(pybuilder, profile, bmode, platform, builder, args.winsdk_dir, args.winsdk_include, args.mingw_bin, args.msvc_bin, args.msvc_include, meta_inputs, args.max_threads)
+        ret = main(pybuilder, profile, bmode, platform, builder, args.winsdk_dir, args.winsdk_include, args.mingw_bin, args.msvc_bin, args.msvc_include, meta_inputs, args.max_threads, args.batch)
     finally:
         try:
             if DISPLAY:
