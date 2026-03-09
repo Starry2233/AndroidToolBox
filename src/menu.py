@@ -334,101 +334,189 @@ def pause(message: str = "按任意键继续...", style_override: Style | None =
     - 支持鼠标/触摸点击（左键单击或触控）确认。
     - 可选 `timeout`（秒）在超时后自动继续。
     """
-    # 确保有样式可用
-    chosen_style = style_override or DEFAULT_STYLE
-    if chosen_style is None:
-        fallback_style = Style.from_dict({
-            "pause": "fg:#cbd6e2",
-        })
-        set_default_style(fallback_style)
-        chosen_style = DEFAULT_STYLE
-
-    pause_style = Style.from_dict({"pause": "fg:#9dcffb bold"})
-    app_style = merge_styles([chosen_style, pause_style]) if chosen_style else pause_style
-
-    kb = KeyBindings()
-
-    @kb.add("enter", eager=True)
-    @kb.add(" ", eager=True)
-    def _enter(event):
-        event.app.exit()
-
-    @kb.add('<any>')
-    def _any(event):
-        event.app.exit()
-
-    def _mouse_handler(mouse_event):
-        # 仅在抬起事件时响应，兼容触控行为
-        if mouse_event.event_type == MouseEventType.MOUSE_UP:
-            try:
-                get_app().exit()
-            except Exception:
-                pass
-        return None
-
-    class PauseControl(FormattedTextControl):
-        def __init__(self, render_fn, handler):
-            super().__init__(render_fn, focusable=True, show_cursor=False)
-            self._handler = handler
-
-        def mouse_handler(self, mouse_event):
-            return self._handler(mouse_event)
-
-    control = PauseControl(lambda: [("class:pause", message)], _mouse_handler)
-    window = Window(content=control, always_hide_cursor=True, dont_extend_width=False, dont_extend_height=False)
-
-    app = Application(
-        layout=Layout(window, focused_element=control),
-        key_bindings=kb,
-        mouse_support=True,
-        full_screen=False,
-        style=app_style,
-    )
-
-    if timeout is not None and timeout > 0:
-        def _timer():
-            time.sleep(timeout)
-            try:
-                app.exit()
-            except Exception:
-                pass
-
-        t = threading.Thread(target=_timer, daemon=True)
-        t.start()
-
-    # 运行并阻塞，直到用户按键或点击，或超时
-    try:
-        app.run()
-    except Exception:
-        # 任何错误时回退到简单的输入提示
+    # Helper: console-only pause (Windows msvcrt, POSIX termios/tty/select fallback)
+    def _console_pause(msg: str, to: float | None):
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        if to is not None and to <= 0:
+            print()
+            return
+        # Windows
         try:
-            input(message)
+            import msvcrt
+            start = time.time()
+            if to is None:
+                msvcrt.getwch()
+            else:
+                while True:
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                        break
+                    if time.time() - start >= to:
+                        break
+                    time.sleep(0.05)
+            print()
+            return
         except Exception:
             pass
 
+        # POSIX
+        try:
+            import termios
+            import tty
+            import select
+
+            fd = sys.stdin.fileno()
+            old_attrs = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                if to is None:
+                    os.read(fd, 1)
+                else:
+                    rlist, _, _ = select.select([fd], [], [], to)
+                    if rlist:
+                        os.read(fd, 1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            print()
+            return
+        except Exception:
+            pass
+
+        # Fallback to input()
+        try:
+            input()
+        except Exception:
+            pass
+
+    # If not a tty, do a simple console pause
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _console_pause(message, timeout)
+        return
+
+    # Otherwise try interactive prompt_toolkit pause; if that fails, fallback to console
+    try:
+        # Ensure styles are available
+        chosen_style = style_override or DEFAULT_STYLE
+        if chosen_style is None:
+            fallback_style = Style.from_dict({"pause": "fg:#cbd6e2"})
+            set_default_style(fallback_style)
+            chosen_style = DEFAULT_STYLE
+
+        pause_style = Style.from_dict({"pause": "fg:#9dcffb bold"})
+        app_style = merge_styles([chosen_style, pause_style]) if chosen_style else pause_style
+
+        kb = KeyBindings()
+
+        @kb.add("enter", eager=True)
+        @kb.add(" ", eager=True)
+        def _enter(event):
+            event.app.exit()
+
+        @kb.add("<any>")
+        def _any(event):
+            event.app.exit()
+
+        def _mouse_handler(mouse_event):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                try:
+                    get_app().exit()
+                except Exception:
+                    pass
+            return None
+
+        class PauseControl(FormattedTextControl):
+            def __init__(self, render_fn, handler):
+                super().__init__(render_fn, focusable=True, show_cursor=False)
+                self._handler = handler
+
+            def mouse_handler(self, mouse_event):
+                return self._handler(mouse_event)
+
+        control = PauseControl(lambda: [("class:pause", message)], _mouse_handler)
+        window = Window(content=control, always_hide_cursor=True, dont_extend_width=False, dont_extend_height=False)
+
+        app = Application(
+            layout=Layout(window, focused_element=control),
+            key_bindings=kb,
+            mouse_support=True,
+            full_screen=False,
+            style=app_style,
+        )
+
+        if timeout is not None and timeout > 0:
+            def _timer():
+                time.sleep(timeout)
+                try:
+                    app.exit()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_timer, daemon=True)
+            t.start()
+
+        app.run()
+    except Exception:
+        _console_pause(message, timeout)
+
 
 if __name__ == "__main__":
-    
-    if len(sys.argv) != 2:
-        print("[错误]请提供JSON配置文件的路径作为命令行参数")
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="menu.py", description="菜单工具与 pause 子命令")
+    subparsers = parser.add_subparsers(dest="cmd")
+
+    # pause 子命令：支持自定义消息、超时和颜色/样式
+    pparser = subparsers.add_parser("pause", help="显示暂停提示并等待任意键或超时")
+    pparser.add_argument("--msg", "-m", type=str, default="按任意键继续...", help="要显示的提示文本")
+    pparser.add_argument("--timeout", "-t", type=float, default=None, help="超时时间（秒），为空表示无限等待")
+    pparser.add_argument("--color", "-c", type=str, default=None, help="文本颜色或样式，例如 'red' 或 '#RRGGBB' 或 'fg:#RRGGBB bold'")
+
+    # 兼容旧用法：直接传入 JSON 配置文件路径
+    parser.add_argument("config_path", nargs="?", help="JSON 菜单配置文件路径（可选）")
+
+    args = parser.parse_args()
+
+    if args.cmd == "pause":
+        style_override = None
+        if args.color:
+            # 如果用户传入完整 style 表达式（包含 ':' 或空格），直接使用；否则当作前景色
+            col = args.color.strip()
+            if ":" in col or " " in col:
+                style_spec = col
+            else:
+                style_spec = f"fg:{col}"
+            try:
+                style_override = Style.from_dict({"pause": style_spec})
+            except Exception:
+                # 回退为简单前景色
+                try:
+                    style_override = Style.from_dict({"pause": f"fg:{col}"})
+                except Exception:
+                    style_override = None
+
+        pause(message=args.msg, style_override=style_override, timeout=args.timeout)
+        sys.exit(0)
+
+    config_path = args.config_path
+    if not config_path:
+        print("[错误]请提供JSON配置文件的路径作为命令行参数 或 使用 'pause' 子命令")
         sys.exit(1)
-    
-    config_path = sys.argv[1]
-    
+
     if not os.path.isfile(config_path):
         print(f"[错误]找不到文件 '{config_path}'")
         sys.exit(1)
-    
+
     loaded = load_options_from_json(config_path)
     if not loaded:
         print("[错误]JSON文件中没有找到有效的菜单项")
         sys.exit(1)
-    
+
     try:
         selection = choose_action(loaded)
     except Exception as e:
         print(f"[错误]菜单选择时发生错误: {str(e)}")
         sys.exit(1)
-    
+
     with open("menutmp.txt", "w", encoding="utf-8") as f:
         f.write(selection)

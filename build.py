@@ -1076,17 +1076,35 @@ def main(python_builder: int, profile: int, bmode: str, platform: str, builder: 
         # Prepare commands based on profile
         commands = []
         nuitka_non_interactive_flags = ["--assume-yes-for-downloads"]
+        # Prefer enabling the cffi plugin if the installed Nuitka exposes it,
+        # otherwise skip the plugin (it may not exist in this Nuitka release)
+        nuitka_plugin_flags: list[str] = []
+        try:
+            p = subprocess.run([python_exe, "-m", "nuitka", "--plugin-list"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+            if p.stdout and "cffi" in p.stdout:
+                nuitka_plugin_flags = ["--enable-plugin=cffi"]
+            else:
+                custom_write("Nuitka cffi plugin not found; skipping --enable-plugin=cffi")
+        except Exception:
+            custom_write("Failed to query Nuitka plugins; skipping --enable-plugin=cffi")
+
+        # Also explicitly request inclusion of the binary extension module as a fallback
+        nuitka_include_flags = ["--include-module=_cffi_backend"]
         for src_script, exe_name in python_scripts:
             if profile == 0:  # Release build
                 cmd = [python_exe, "-m", "nuitka",
                        "--onefile", "--lto=yes", "--python-flag=-OO", "--remove-output",
                        *nuitka_non_interactive_flags,
+                       *nuitka_plugin_flags,
+                       *nuitka_include_flags,
                        "--output-dir=./build/py/dist",
                        "--nofollow-import-to=debughook,debugpy,pydevd,pdb,unittest,pytest,test",
                        f"src/{src_script}", nuitka_compiler_flag]
             else:  # Debug build
                 cmd = [python_exe, "-m", "nuitka",
                        "--onefile", "--lto=no", *nuitka_non_interactive_flags,
+                       *nuitka_plugin_flags,
+                       *nuitka_include_flags,
                        "--output-dir=./build/py/dist", "--debug", "--no-debug-c-warnings", "--debugger",
                        f"src/{src_script}", nuitka_compiler_flag]
             commands.append((cmd, src_script, exe_name))
