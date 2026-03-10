@@ -327,7 +327,7 @@ def choose_action(options: List[Tuple[str, str]] | None = None, message: str = "
     return choose(message, options, default=options[0][0])
 
 
-def pause(message: str = "按任意键继续...", style_override: Style | None = None, timeout: float | None = None) -> None:
+def pause(message: str = "单击此字符或按任意键继续", style_override: Style | None = None, timeout: float | None = None) -> None:
     """显示一个短暂的提示，等待任意键或鼠标/触摸点击继续。
 
     - 支持键盘任意按键确认。
@@ -468,7 +468,7 @@ if __name__ == "__main__":
 
     # pause 子命令：支持自定义消息、超时和颜色/样式
     pparser = subparsers.add_parser("pause", help="显示暂停提示并等待任意键或超时")
-    pparser.add_argument("--msg", "-m", type=str, default="按任意键继续...", help="要显示的提示文本")
+    pparser.add_argument("--msg", "-m", type=str, default="单击此字符或按任意键继续", help="要显示的提示文本")
     pparser.add_argument("--timeout", "-t", type=float, default=None, help="超时时间（秒），为空表示无限等待")
     pparser.add_argument("--color", "-c", type=str, default=None, help="文本颜色或样式，例如 'red' 或 '#RRGGBB' 或 'fg:#RRGGBB bold'")
 

@@ -510,16 +510,136 @@ def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
     )
 
 
-def pause():
-    kb = KeyBindings()
+def pause(message: str = "单击此字符或按任意键继续", style_override: Optional[Style] = None, timeout: Optional[float] = None) -> None:
+    """显示一个短暂的提示，等待任意键或鼠标/触摸点击继续。
 
-    @kb.add('<any>')
-    def _(event):
-        global pressed_key
-        pressed_key = event.key_sequence[0].key
-        event.app.exit()
+    向 `src/menu.py` 的 `pause` 保持一致：
+    - 支持键盘任意按键确认。
+    - 支持鼠标/触摸点击确认。
+    - 可选 `timeout`（秒）在超时后自动继续。
+    """
+    def _console_pause(msg: str, to: Optional[float]):
+        sys.stdout.write(msg)
+        sys.stdout.flush()
+        if to is not None and to <= 0:
+            print()
+            return
+        # Windows
+        try:
+            import msvcrt
 
-    PromptSession(key_bindings=kb).prompt("")
+            start = time.time()
+            if to is None:
+                msvcrt.getwch()
+            else:
+                while True:
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                        break
+                    if time.time() - start >= to:
+                        break
+                    time.sleep(0.05)
+            print()
+            return
+        except Exception:
+            pass
+
+        # POSIX
+        try:
+            import termios
+            import tty
+            import select
+
+            fd = sys.stdin.fileno()
+            old_attrs = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                if to is None:
+                    os.read(fd, 1)
+                else:
+                    rlist, _, _ = select.select([fd], [], [], to)
+                    if rlist:
+                        os.read(fd, 1)
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            print()
+            return
+        except Exception:
+            pass
+
+        # Fallback to input()
+        try:
+            input()
+        except Exception:
+            pass
+
+    # If not a tty, do a simple console pause
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _console_pause(message, timeout)
+        return
+
+    # Otherwise try interactive prompt_toolkit pause; if that fails, fallback to console
+    try:
+        chosen_style = style_override or style
+        if chosen_style is None:
+            fallback_style = Style.from_dict({"pause": "fg:#cbd6e2"})
+            chosen_style = fallback_style
+
+        pause_style = Style.from_dict({"pause": "fg:#9dcffb bold"})
+        app_style = merge_styles([chosen_style, pause_style]) if chosen_style else pause_style
+
+        kb = KeyBindings()
+
+        @kb.add("enter", eager=True)
+        @kb.add(" ", eager=True)
+        def _enter(event):
+            event.app.exit()
+
+        @kb.add("<any>")
+        def _any(event):
+            event.app.exit()
+
+        def _mouse_handler(mouse_event):
+            if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                try:
+                    get_app().exit()
+                except Exception:
+                    pass
+            return None
+
+        class PauseControl(FormattedTextControl):
+            def __init__(self, render_fn, handler):
+                super().__init__(render_fn, focusable=True, show_cursor=False)
+                self._handler = handler
+
+            def mouse_handler(self, mouse_event):
+                return self._handler(mouse_event)
+
+        control = PauseControl(lambda: [("class:pause", message)], _mouse_handler)
+        window = Window(content=control, always_hide_cursor=True, dont_extend_width=False, dont_extend_height=False)
+
+        app = Application(
+            layout=Layout(window, focused_element=control),
+            key_bindings=kb,
+            mouse_support=True,
+            full_screen=False,
+            style=app_style,
+        )
+
+        if timeout is not None and timeout > 0:
+            def _timer():
+                time.sleep(timeout)
+                try:
+                    app.exit()
+                except Exception:
+                    pass
+
+            t = threading.Thread(target=_timer, daemon=True)
+            t.start()
+
+        app.run()
+    except Exception:
+        _console_pause(message, timeout)
 
 
 def check_adb_server() -> Tuple[bool, Optional[Exception]]:
@@ -922,26 +1042,15 @@ def anykernel3():
 @auto_clear(logo=True, end=True)
 def root():
     while True:
-        if allow_xtc:
-            result = choose(
-                message="一键Root菜单",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "Wear一键Root"),
-                    Option("2", "手机通用Root"),
-                ],
-                default="A"
-            )
-        else:
-            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-            result = choose(
-                message="一键Root菜单",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("2", "手机通用Root"),
-                ],
-                default="A"
-            )
+        result = choose(
+            message="一键Root菜单",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "Wear一键Root"),
+                Option("2", "手机通用Root"),
+            ],
+            default="A"
+        )
         match result:
             case "A":
                 return
@@ -958,32 +1067,18 @@ def root():
 @auto_clear(logo=True, end=True)
 def appset():
     while True:
-        if allow_xtc:
-            result = choose(
-                message="应用管理菜单",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "安装应用"),
-                    Option("2", "卸载应用"),
-                    Option("3", "安装状态栏悬浮窗"),
-                    Option("4", "设置微信QQ为开机自启应用"),
-                    Option("5", "解除z10 V2版本安装限制-V3不适用"),
-                ],
-                default="A"
-            )
-        else:
-            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-            result = choose(
-                message="应用管理菜单",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "安装应用"),
-                    Option("2", "卸载应用"),
-                    Option("3", "安装状态栏悬浮窗"),
-                    Option("4", "设置微信QQ为开机自启应用"),
-                ],
-                default="A"
-            )
+        result = choose(
+            message="应用管理菜单",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "安装应用"),
+                Option("2", "卸载应用"),
+                Option("3", "安装状态栏悬浮窗"),
+                Option("4", "设置微信QQ为开机自启应用"),
+                Option("5", "解除z10 V2版本安装限制-V3不适用"),
+            ],
+            default="A"
+        )
         if result == "A":
             return
         if result == "1":
@@ -1002,37 +1097,21 @@ def appset():
 @auto_clear(logo=True, end=True)
 def userdebug():
     while True:
-        if allow_xtc:
-            result = choose(
-                message="Advanced Options",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "设备信息"),
-                    Option("2", "打开充电可用"),
-                    Option("3", "型号与innermodel对照表"),
-                    Option("4", "导入本地root文件"),
-                    Option("5", "一键root[不刷userdata]"),
-                    Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
-                    Option("7", "开机自刷Recovery"),
-                    Option("8", "强制加好友[已失效]"),
-                ],
-                default="A"
-            )
-        else:
-            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线部分功能，敬请谅解"), style=style)
-            result = choose(
-                message="Advanced Options",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "设备信息"),
-                    Option("2", "打开充电可用"),
-                    Option("3", "型号与innermodel对照表"),
-                    Option("4", "导入本地root文件"),
-                    Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
-                    Option("7", "开机自刷Recovery"),
-                ],
-                default="A"
-            )
+        result = choose(
+            message="Advanced Options",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "设备信息"),
+                Option("2", "打开充电可用"),
+                Option("3", "型号与innermodel对照表"),
+                Option("4", "导入本地root文件"),
+                Option("5", "一键root[不刷userdata]"),
+                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
+                Option("7", "开机自刷Recovery"),
+                Option("8", "强制加好友[已失效]"),
+            ],
+            default="A"
+        )
 
         if result == "A":
             return
@@ -1042,7 +1121,7 @@ def userdebug():
             run("call opencharge"); clear();run("call logo")
         if result == "3":
             run("call innermodel")
-            print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
+            print_formatted_text(HTML(INFO + "单击此字符或按任意键继续返回上级菜单"), style=style)
             pause(); clear();run("call logo")
         if result == "4":
             run("call pashroot"); clear();run("call logo")
@@ -1075,8 +1154,6 @@ def commonly():
         ]
         if DEBUG:
             commonly_list.append(Option("10", "刷入AnyKernel3[实验性]"))
-        if not allow_xtc:
-            print_formatted_text(HTML(INFO + "由于版权原因，暂时下线ADB/自检校验码计算功能，敬请谅解"), style=style)
         result = choose(
             message="常用合集",
             options=commonly_list,
@@ -1099,7 +1176,7 @@ def commonly():
                 run("call rootpro")
             case "7":
                 run("call qmmi")
-                print_formatted_text(HTML(INFO + "按任意键返回上级菜单"), style=style)
+                print_formatted_text(HTML(INFO + "单击此字符或按任意键继续返回上级菜单"), style=style)
                 pause()
             case "8":
                 run("call scrcpy-ui.bat")
@@ -1183,34 +1260,20 @@ def debug():
 @auto_clear(logo=True, end=True)
 def help_menu():
     while True:
-        if allow_xtc:
-            result = choose(
-                message="帮助与链接",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("1", "超级恢复文件下载"),
-                    Option("2", "离线OTA下载"),
-                    Option("3", "面具模块下载"),
-                    Option("4", "APK下载"),
-                    Option("5", "工具箱官网"),
-                    Option("6", "开发文档"),
-                    Option("7", "123云盘解除下载限制")
-                ],
-                default="A"
-            )
-        else:
-            result = choose(
-                message="帮助与链接",
-                options=[
-                    Option("A", "返回上级菜单"),
-                    Option("2", "离线OTA下载"),
-                    Option("3", "面具模块下载"),
-                    Option("5", "工具箱官网"),
-                    Option("6", "开发文档"),
-                    Option("7", "123云盘解除下载限制")
-                ],
-                default="A"
-            )
+        result = choose(
+            message="帮助与链接",
+            options=[
+                Option("A", "返回上级菜单"),
+                Option("1", "超级恢复文件下载"),
+                Option("2", "离线OTA下载"),
+                Option("3", "面具模块下载"),
+                Option("4", "APK下载"),
+                Option("5", "工具箱官网"),
+                Option("6", "开发文档"),
+                Option("7", "123云盘解除下载限制"),
+            ],
+            default="A"
+        )
         match result:
             case "A":
                 return
@@ -1230,7 +1293,7 @@ def help_menu():
                     print_formatted_text(HTML(doc), style=style)
                 kb = KeyBindings()
                 prompt(
-                    HTML(INFO + "按任意键返回上级菜单"),
+                    HTML(INFO + "单击此字符或按任意键继续返回上级菜单"),
                     key_bindings=kb,
                     style=style
                 )
@@ -1354,7 +1417,7 @@ def about():
     kb = KeyBindings()
 
     prompt(
-        HTML(INFO + "按任意键返回上级菜单"),
+        HTML(INFO + "单击此字符或按任意键继续返回上级菜单"),
         key_bindings=kb,
         style=style
     )
@@ -1469,7 +1532,7 @@ def pre_main() -> bool:
                 print_formatted_text(HTML(WARN + "当前补丁版本过时，必须更新"), style=style)
                 if new_version:
                     print_formatted_text(HTML(INFO + f"最新补丁版本：{new_version}"), style=style)
-                print_formatted_text(HTML(INFO + "按任意键开始更新..."), style=style)
+                print_formatted_text(HTML(INFO + "单击此字符或按任意键继续开始更新..."), style=style)
                 pause()
                 shutil.copy2("repair.exe", "..\\repair.exe")
                 os.chdir("..\\")
@@ -1478,7 +1541,7 @@ def pre_main() -> bool:
         except Exception:
             pass
         run("call upall.bat run")
-
+        """fucking xtc"""
     """allow_xtc = True"""
 
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
@@ -1521,7 +1584,7 @@ def pre_main() -> bool:
         {INFO}工具箱交流与反馈QQ群：907491503
         {INFO}作者哔哩哔哩账号：https://b23.tv/L54R5ZV
         {INFO}bug与建议反馈邮箱：ATBbug@xgj.qzz.io""".replace(" " * 8, "")), style=style)
-    print_formatted_text(HTML(INFO + "按任意键进入主界面"), style=style)
+    print_formatted_text(HTML(INFO + "单击此字符或按任意键继续进入主界面"), style=style)
 
     pause()
     flag = True
