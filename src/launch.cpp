@@ -2,7 +2,7 @@
 #include <string>
 #include <vector>
 
-const std::wstring RUN_BAT_CMD = L"start.bat";
+const std::wstring RUN_BAT_CMD = L"main.exe";
 
 #ifdef _WIN32
 BOOL IsRunAsAdmin()
