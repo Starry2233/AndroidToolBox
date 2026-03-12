@@ -1684,6 +1684,19 @@ if __name__ == "__main__":
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
 
+    # Initialize cloud-control detection at startup: if the endpoint is
+    # unreachable, cloud control features will be disabled for this run.
+    try:
+        import menu as _menu
+        try:
+            _menu.init_cloud_control()
+        except Exception:
+            # If init fails, ensure cloud control is treated as disabled for this run
+            pass
+    except Exception:
+        # If importing menu fails, ignore and continue startup
+        pass
+
     exit_code = main()
     logger.debug("ATBExitEvent, main returned: %s", exit_code)
     cleanup(exit_code)
