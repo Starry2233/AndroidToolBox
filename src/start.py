@@ -1430,7 +1430,7 @@ def pre_main() -> bool:
     global logger
     global DEBUG
     global CURRENT_BUILD_META
-    colorama.init(autoreset=True)
+    colorama.init(autoreset=True, convert=True)
     run("call .\\color.bat")
     _PATHEXT: str = os.environ["PATHEXT"]
     if not _PATHEXT.endswith(';'): _PATHEXT += ';'
