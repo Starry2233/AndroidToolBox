@@ -1,5 +1,7 @@
 :_MODULE_MAIN
 setlocal enabledelayedexpansion
+    cls
+    call .\logo.bat
     echo %INFO%点击超级用户，找到Shell并授予权限%RESET%
     call scrcpy.exe
     busybox.exe sleep 1
