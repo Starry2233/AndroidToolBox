@@ -912,6 +912,7 @@ def menu() -> str:
 
     options = [
         Option("onekeyroot", "一键Root"),
+        Option("gbl", "粗粮高通机型临时Root&强解bl"),
         Option("openshell", "在此处打开cmd[含adb环境]"),
         Option("about", "关于脚本"),
         Option("mods", "扩展管理"),
@@ -1061,6 +1062,12 @@ def root():
                 ato.stop_audio()
             case "2":
                 run("call otherroot.bat 3"); clear()
+
+
+@onerror
+@auto_clear(logo=True, end=True)
+def qcom_gbl():
+    run("call qcom_gbl_selinux.bat"); clear()
 
 
 @onerror
@@ -1620,6 +1627,9 @@ class AllToolBox(object):
             return None
         if action == "onekeyroot":
             root()
+            return None
+        if action == "gbl":
+            qcom_gbl()
             return None
         if action == "openshell":
             clear()
