@@ -1,12 +1,11 @@
 #include "launch.h"
-#include <string>
-#include <vector>
 
 const std::wstring RUN_BAT_CMD = L"main.exe";
 
-#ifdef _WIN32
-BOOL IsRunAsAdmin()
+
+bool IsRunAsAdmin()
 {
+#ifdef _WIN32
     BOOL isAdmin = FALSE;
     PSID adminGroup = NULL;
     SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
@@ -21,9 +20,12 @@ BOOL IsRunAsAdmin()
         FreeSid(adminGroup);
     }
 
-    return isAdmin;
-}
+    return static_cast<bool>(isAdmin);
+#else
+    uid_t userId = geteuid();
+    return userId == 0;
 #endif
+}
 
 void Message()
 {
@@ -72,6 +74,44 @@ void ElevatePrivileges()
     }
 }
 
+#ifdef _WIN32
+void ClearScreen()
+{
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hConsole == INVALID_HANDLE_VALUE) return;
+
+    DWORD mode = 0;
+    if (!GetConsoleMode(hConsole, &mode)) return;
+
+    bool vtSupported = (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+    if (vtSupported)
+    {
+        const char* seq = "\x1b[2J\x1b[H";
+        std::cout << seq;
+    }
+    else
+    {
+        CONSOLE_SCREEN_BUFFER_INFO csbi;
+        if (!GetConsoleScreenBufferInfo(hConsole, &csbi)) return;
+        DWORD cellCount = csbi.dwSize.X * csbi.dwSize.Y;
+        DWORD written;
+        FillConsoleOutputCharacterW(hConsole, L' ', cellCount, { 0 , 0 }, &written);
+        FillConsoleOutputAttribute(
+            hConsole,
+            csbi.wAttributes,
+            cellCount,
+            { 0 , 0 },
+            &written
+        );
+        SetConsoleCursorPosition(hConsole, { 0 , 0 });
+
+        // try to enable vtp
+        mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(hConsole, mode);
+    }
+}
+#endif
+
 void RunMainBat(int argc, wchar_t* argv[])
 {
     printf("\033[94m[信息]\033[97m正在启动中...\033[0m\n");
@@ -103,13 +143,27 @@ void RunMainBat(int argc, wchar_t* argv[])
     }
 }
 
-int wmain(int argc, wchar_t* argv[])
+int main(int argc, wchar_t* argv[])
 {
+#ifdef _WIN32
     SetConsoleOutputCP(936);
+    for (int i = 0; i <= 3; ++i)
+    {
+        ClearScreen();
+        std::cout << "\r\n" << std::flush;
+    }
+#endif
+
     if (!IsRunAsAdmin())
     {
+#ifdef _WIN32
         ElevatePrivileges();
+#else
+        fprintf(stderr, "non-root is not supported, please run as root");
+        return 1;
+#endif
     }
+
 #if DEBUG
     printf("[INFO] 程序提权成功");
 #endif

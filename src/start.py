@@ -1446,7 +1446,7 @@ def pre_main() -> bool:
     os.environ["PATHEXT"] = _PATHEXT
     print(_PATHEXT)
     if DEBUG:
-        print_formatted_text(HTML(INFO + "已启用调试模式"), style=style)
+        print_formatted_text(HTML(WARN + "已启用调试模式 内部版本可能有未知问题"), style=style)
         logger.debug("Debug mode is enabled")
     env_path_lower = (os.environ.get("PATH") or "").lower()
     keywords = ["windows", "system32", "powershell"]
