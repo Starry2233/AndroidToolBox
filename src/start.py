@@ -324,7 +324,7 @@ class PersistentCmdShell:
                     continue
 
                 if in_env:
-                    if "=" in clean:
+                    if "=" in clean: 
                         key, value = clean.split("=", 1)
                         env_snapshot[key] = value
                     continue

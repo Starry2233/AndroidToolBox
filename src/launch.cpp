@@ -117,7 +117,6 @@ void RunMainBat(int argc, wchar_t* argv[])
     printf("\033[94m[信息]\033[97m正在启动中...\033[0m\n");
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
-    SetCurrentDirectoryW(L".\\bin\\");
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
     DWORD flags = 0;
