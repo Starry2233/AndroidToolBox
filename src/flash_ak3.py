@@ -6,7 +6,7 @@ import subprocess
 import shutil
 
 
-_AK3_MAINFILE: Final[List[str]] = ["zImage", "Image"]
+_AK3_MAINFILE: Final[List[str]] = ["zImage", "Image", "bzImage", "zImage.gz", "Image.gz", "bzImage.gz", "zImage.xz", "Image.xz", "bzImage.xz", "kernel", "kernel.gz", "kernel.xz"]
 
 
 class AnyKernel3(object):
@@ -37,6 +37,19 @@ class AnyKernel3(object):
                 if mainfile in zip_ref.namelist():
                     zip_ref.extract(mainfile, self.ak3_extract_to)
                     self.mainfile = os.path.abspath(os.path.join(self.ak3_extract_to, mainfile))
+                    # Decompress if kernel is compressed (gz or xz)
+                    if self.mainfile.lower().endswith('.gz'):
+                        import gzip, shutil as _shutil
+                        decompressed_path = self.mainfile[:-3]
+                        with gzip.open(self.mainfile, 'rb') as f_in, open(decompressed_path, 'wb') as f_out:
+                            _shutil.copyfileobj(f_in, f_out)
+                        self.mainfile = decompressed_path
+                    elif self.mainfile.lower().endswith('.xz'):
+                        import lzma, shutil as _shutil
+                        decompressed_path = self.mainfile[:-3]
+                        with lzma.open(self.mainfile, 'rb') as f_in, open(decompressed_path, 'wb') as f_out:
+                            _shutil.copyfileobj(f_in, f_out)
+                        self.mainfile = decompressed_path
                     return self.mainfile
             raise FileNotFoundError("No AnyKernel3 main file found in the zip.")
     
@@ -103,5 +116,6 @@ class AnyKernel3(object):
             if self.bootimg_unpacked_path: unpacked_path = self.bootimg_unpacked_path
             else: raise ValueError()
 
-        os.removedirs(unpacked_path)
+        shutil.rmtree(unpacked_path, ignore_errors=True)
         return None # noqa
+    

@@ -132,6 +132,8 @@ class AtbBuild(object):
                 encoding='utf-8',
                 errors='replace'
             )
+            process.wait()
+
         else:
             process = subprocess.Popen(
                 final_cmd_list,
@@ -170,7 +172,6 @@ class AtbBuild(object):
         if process.returncode != 0:
             self.errs += 1
             self.success = False
-        
         return process.returncode
 
     def run_build_logic(self):
@@ -259,9 +260,9 @@ class AtbBuild(object):
         for src, out in files:
             if src in self.py_fresh:
                 continue
-            shutil.copy2(src, f"./build/py/{out[:-4]}.py")
             cmd = [sys.executable, "-m", "nuitka", "--onefile", src, "--output-dir=./build/py/", f"--output-filename={out}", "--msvc=latest"] + nuitka_flags
-            self.run_command(cmd)
+            if self.run_command(cmd):
+                shutil.copy2(src, f"./build/py/{out[:-4]}.py")
 
         # Cargo Build
         cargo_cmd = ["cargo", "build"]
@@ -290,7 +291,7 @@ class AtbBuild(object):
 
             with py7zr.SevenZipFile('bin.7z', mode='r') as z:
                 z.extractall(path='./build/main')
-        except Exception:
+        except Exception as e:
             self.errs += 1
             self.success = False
             return
@@ -321,13 +322,13 @@ class AtbBuild(object):
             sys.stdout.write('\n')
 
         if self.lang != "zh_CN":
-            print(f"  {self.warns} warnings")
-            print(f"  {self.errs} errors")
+            print(f"  {self.warns} warning{'s' if self.warns != 1 else ''}")
+            print(f"  {self.errs} error{'s' if self.errs != 1 else ''}")
         else:
             print(f"  {self.warns} 个警告")
             print(f"  {self.errs} 个错误")
         
-        if self.success:
+        if self.success and self.errs == 0:
             print(f"\n{Fore.YELLOW}{self.success_msg}{Style.RESET_ALL}")
         else:
             if hasattr(self, "interrupt"):

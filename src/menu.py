@@ -184,34 +184,6 @@ def _fetch_cloud_flag(url: str, timeout: float = 3.0) -> str | None:
         return None
 
 
-# Cloud control runtime state
-CLOUD_CONTROL_URL = "https://atb.xgj.qzz.io/check.info"
-CLOUD_CONTROL_TIMEOUT = 3.0
-CLOUD_CONTROL_REACHABLE: bool | None = None
-CLOUD_CONTROL_INITIALIZED = False
-
-
-def init_cloud_control(url: str | None = None, timeout: float | None = None) -> bool:
-    """Attempt to contact cloud-control endpoint once and set module-level state.
-
-    Returns True if the endpoint is reachable (regardless of its returned value),
-    False otherwise. The state is stored in `CLOUD_CONTROL_REACHABLE` and
-    `CLOUD_CONTROL_INITIALIZED`.
-    """
-    global CLOUD_CONTROL_REACHABLE, CLOUD_CONTROL_INITIALIZED
-    if url is None:
-        url = CLOUD_CONTROL_URL
-    if timeout is None:
-        timeout = CLOUD_CONTROL_TIMEOUT
-    try:
-        res = _fetch_cloud_flag(url, timeout=timeout)
-        CLOUD_CONTROL_REACHABLE = res is not None
-    except Exception:
-        CLOUD_CONTROL_REACHABLE = False
-    CLOUD_CONTROL_INITIALIZED = True
-    return bool(CLOUD_CONTROL_REACHABLE)
-
-
 def _is_main_running() -> bool:
     """Return True if a process named 'main.exe' is running (best-effort)."""
     try:
@@ -785,12 +757,6 @@ def choose_action(options: List[Tuple[str, str]] | None = None, message: str = "
 
 
 def pause(message: str = "单击此字符或按任意键继续", style_override: Style | None = None, timeout: float | None = None, ansi_spec: str | None = None) -> None:
-    """显示一个短暂的提示，等待任意键或鼠标/触摸点击继续。
-
-    - 支持键盘任意按键确认。
-    - 支持鼠标/触摸点击（左键单击或触控）确认。
-    - 可选 `timeout`（秒）在超时后自动继续。
-    """
     # Helper: console-only pause (Windows msvcrt, POSIX termios/tty/select fallback)
     def _console_pause(msg: str, to: float | None, ansi_spec: str | None = None):
         # If an ANSI spec is given, convert to escape sequences and print.
@@ -1018,44 +984,6 @@ if __name__ == "__main__":
             print("[错误]JSON文件中没有找到有效的菜单项")
             sys.exit(1)
 
-        # Cloud control check: initialize on startup and only attempt to use
-        # cloud control if the endpoint was reachable during initialization.
-        blocked = False
-        try:
-            if not CLOUD_CONTROL_INITIALIZED:
-                try:
-                    init_cloud_control()
-                except Exception:
-                    # mark unreachable
-                    pass
-
-            flag = None
-            if CLOUD_CONTROL_REACHABLE:
-                flag = _fetch_cloud_flag(CLOUD_CONTROL_URL)
-
-            if flag and flag.strip().lower() == "true":
-                present = _is_main_present() or _is_main_running()
-                if not present:
-                    # replace labels with piracy notice
-                    if loaded:
-                        loaded = [(v, "您当前使用的是盗版AllToolBox") for v, _ in loaded]
-                    else:
-                        loaded = [("null", "您当前使用的是盗版AllToolBox")]
-                    # write menutmp as null and increment fail counter
-                    try:
-                        with open("menutmp.txt", "w", encoding="utf-8") as f:
-                            f.write("null")
-                    except Exception:
-                        pass
-                    cnt = _increment_menufailed_count()
-                    if cnt >= 3:
-                        # Placeholder trigger file; actual code to execute provided by user
-                        sys.exit(2)
-                    blocked = True
-        except Exception:
-            # Any unexpected error — do not block by default
-            blocked = False
-
         try:
             if multi_select:
                 sel_list = menu_multi_choice("请选择操作", loaded)
@@ -1069,12 +997,11 @@ if __name__ == "__main__":
 
         # If cloud control blocked the system, keep menutmp as 'null' (already written);
         # otherwise write the selected result.
-        if not blocked:
-            try:
-                with open("menutmp.txt", "w", encoding="utf-8") as f:
-                    f.write(result)
-            except Exception:
-                pass
+        try:
+            with open("menutmp.txt", "w", encoding="utf-8") as f:
+                f.write(result)
+        except Exception:
+            pass
         sys.exit(0)
 
     import argparse

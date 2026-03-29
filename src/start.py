@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 
-"""AllToolBox startup script and interactive menu entrypoint."""
+"""AndroidToolkit startup script and interactive menu entrypoint."""
 
+# Hidden import to ensure CFFI modules are properly included in Nuitka builds
+import _cffi_backend # noqa: F401
 import logging
 import os
 import sys
@@ -42,13 +44,12 @@ import threading
 import uuid
 import atexit
 import pluginutils, pluginutils.load, pluginutils.manage
-
 try:
-    from build_info import BUILD_TYPE
-except (ImportError, ModuleNotFoundError):
-    BUILD_TYPE = "release"
-
-ALLOW_XTC = True
+    import msvcrt
+except ImportError:
+    import termios
+    import tty
+    import select
 
 
 style = Style.from_dict({
@@ -74,25 +75,8 @@ WARN = "<orange>[警告]</orange>"
 flag = False
 key = False
 started = False
-_RUN_ENV_READY = False
-_RUN_ENV_CACHE: Optional[Dict[str, str]] = None
-_PATHEXT_EXTRA = [".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".VBE", ".JS", ".JSE", ".WSF", ".WSH", ".MSC"]
-_RUN_SHELL: Optional["PersistentCmdShell"] = None
-
-
-def _normalize_build_type(value: str) -> str:
-    return "debug" if str(value).strip().lower() == "debug" else "release"
-
-
-BUILD_MODE = _normalize_build_type(BUILD_TYPE)
-CURRENT_BUILD_META: Dict[str, str] = {
-    "ro.build.type": BUILD_MODE,
-    "persist.atb.xtc.allow": "True",
-}
 
 LINE = "-" * 68
-DEBUG = BUILD_MODE == "debug"
-allow_xtc = True
 
 
 class MultilineFormatter(logging.Formatter):
@@ -137,7 +121,7 @@ def onerror(fn):
             logger.error(f"Error in {fn.__name__}: {e}")
             logger.exception("msg")
             print_formatted_text(HTML(ERROR + "抱歉，脚本遇到了未经捕获的异常，即将退出..."), style=style)
-            print_formatted_text(HTML(INFO + "错误详情已记录到 bin/logs 文件夹中，您可以将该文件发送给技术支持以获取帮助。"), style=style)
+            print_formatted_text(HTML(INFO + "错误详情已记录到安装目录下 logs 文件夹中，您可以将该文件发送给技术支持以获取帮助。"), style=style)
             time.sleep(3)
             cleanup(-1)
     return wrapper
@@ -158,347 +142,13 @@ def auto_clear(fn=None, *, logo=False, end=False):
     return decorator(fn) if fn is not None else decorator
 
 
-def _build_run_env() -> Dict[str, str]:
-    env = os.environ.copy()
-    path = env.get("PATH", "")
-    if "." not in path.split(";"):
-        env["PATH"] = f".;{path}" if path else "."
-    current_ext = str(env.get("PATHEXT") or "")
-    ext_items = [item.strip() for item in current_ext.split(";") if item.strip()]
-    ext_upper = {item.upper() for item in ext_items}
-    for item in _PATHEXT_EXTRA:
-        if item.upper() not in ext_upper:
-            ext_items.append(item)
-            ext_upper.add(item.upper())
-    env["PATHEXT"] = ";".join(ext_items)
-    return env
-
-
-class PersistentCmdShell:
-    def __init__(self, env: Dict[str, str]):
-        self._encoding = "mbcs"
-        self._lock = threading.Lock()
-        self._proc = subprocess.Popen(
-            ["cmd.exe", "/d", "/q", "/v:on"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding=self._encoding,
-            errors="replace",
-            env=env,
-        )
-        self._initialize_shell()
-
-    def _initialize_shell(self) -> None:
-        # One-time shell setup.
-        self._write_line("@echo off")
-        if os.path.isfile(".\\color.bat"):
-            self._write_line("call .\\color.bat 1>nul 2>nul")
-        self._flush_stdin()
-
-    def _write_line(self, line: str) -> None:
-        if not self._proc.stdin:
-            raise RuntimeError("Persistent cmd stdin is unavailable")
-        self._proc.stdin.write(line + "\n")
-
-    def _flush_stdin(self) -> None:
-        if not self._proc.stdin:
-            raise RuntimeError("Persistent cmd stdin is unavailable")
-        self._proc.stdin.flush()
-
-    def is_alive(self) -> bool:
-        return self._proc.poll() is None
-
-    def close(self) -> None:
-        with self._lock:
-            try:
-                if self.is_alive():
-                    self._write_line("exit")
-                    self._flush_stdin()
-                    self._proc.wait(timeout=1)
-            except Exception:
-                pass
-            try:
-                if self._proc.stdin:
-                    self._proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                if self._proc.stdout:
-                    self._proc.stdout.close()
-            except Exception:
-                pass
-
-    def run_command(
-        self,
-        command: str,
-        extra_env: Optional[Dict[str, str]] = None,
-        capture_output: bool = False,
-    ) -> Tuple[subprocess.CompletedProcess, Dict[str, str]]:
-        if not self.is_alive():
-            raise RuntimeError("Persistent cmd process has exited")
-
-        token = uuid.uuid4().hex.upper()
-        begin_marker = f"__ATB_BEGIN_{token}__"
-        end_marker = f"__ATB_END_{token}__"
-        env_begin_marker = f"__ATB_ENV_BEGIN_{token}__"
-        env_end_marker = f"__ATB_ENV_END_{token}__"
-        rc_prefix = f"__ATB_RC_{token}="
-
-        output_lines: List[str] = []
-        env_snapshot: Dict[str, str] = {}
-        rc = 0
-        in_payload = False
-        in_env = False
-
-        with self._lock:
-            self._write_line("@echo off")
-            if extra_env:
-                for k, v in extra_env.items():
-                    key = str(k)
-                    value = str(v)
-                    self._write_line(f'set "{key}={value}"')
-
-            self._write_line(f"echo {begin_marker}")
-            self._write_line(command)
-            self._write_line("echo(")
-            self._write_line(f"echo {rc_prefix}!ERRORLEVEL!")
-            self._write_line(f"echo {end_marker}")
-            self._write_line(f"echo {env_begin_marker}")
-            self._write_line("set")
-            self._write_line(f"echo {env_end_marker}")
-            self._flush_stdin()
-
-            if not self._proc.stdout:
-                raise RuntimeError("Persistent cmd stdout is unavailable")
-
-            # Timeout (seconds) used to detect a stuck "pause" prompt with no trailing newline.
-            READLINE_TIMEOUT = 20.0
-
-            while True:
-                timer = None
-                # Only enable the timeout-based auto-enter once we've entered the payload section.
-                if in_payload:
-                    def _send_enter():
-                        try:
-                            if self._proc.stdin:
-                                self._proc.stdin.write("\n")
-                                self._proc.stdin.flush()
-                        except Exception:
-                            pass
-
-                    timer = threading.Timer(READLINE_TIMEOUT, _send_enter)
-                    timer.daemon = True
-                    timer.start()
-
-                try:
-                    line = self._proc.stdout.readline()
-                finally:
-                    if timer:
-                        try:
-                            timer.cancel()
-                        except Exception:
-                            pass
-
-                if line == "":
-                    raise RuntimeError("Persistent cmd stdout closed unexpectedly")
-
-                clean = line.rstrip("\r\n")
-                if clean == begin_marker:
-                    in_payload = True
-                    continue
-                if clean == end_marker:
-                    in_payload = False
-                    continue
-                if clean == env_begin_marker:
-                    in_env = True
-                    continue
-                if clean == env_end_marker:
-                    break
-                if clean.startswith(rc_prefix):
-                    try:
-                        rc = int(clean.split("=", 1)[1].strip())
-                    except Exception:
-                        rc = 1
-                    continue
-
-                if in_env:
-                    if "=" in clean: 
-                        key, value = clean.split("=", 1)
-                        env_snapshot[key] = value
-                    continue
-
-                if in_payload:
-                    # Detect pause prompts from batch scripts (e.g. "按任意键..." / "Press any key...")
-                    is_pause_prompt = False
-                    try:
-                        if ("按任意键" in clean) or ("Press any key" in clean) or ("press any key" in clean.lower()):
-                            is_pause_prompt = True
-                    except Exception:
-                        is_pause_prompt = False
-
-                    output_lines.append(clean)
-                    if not capture_output:
-                        try:
-                            # Ensure all output is adapted for ANSI color codes
-                            print_formatted_text(ANSI(clean))
-                        except Exception as e:
-                            logging.error(f"Failed to render ANSI color: {e}")
-                            print(clean)
-
-                    if is_pause_prompt:
-                        # Let the user acknowledge, then send an Enter to the shell so the batch can continue.
-                        try:
-                            pause()
-                        except Exception:
-                            try:
-                                input()
-                            except Exception:
-                                pass
-                        try:
-                            if self._proc.stdin:
-                                self._proc.stdin.write("\n")
-                                self._proc.stdin.flush()
-                        except Exception:
-                            pass
-
-        stdout_text = "\n".join(output_lines) if capture_output else None
-        return subprocess.CompletedProcess(args=command, returncode=rc, stdout=stdout_text, stderr=None), env_snapshot
-
-
-def _ensure_run_initialized() -> PersistentCmdShell:
-    global _RUN_ENV_READY
-    global _RUN_ENV_CACHE
-    global _RUN_SHELL
-
-    if _RUN_ENV_CACHE is None:
-        _RUN_ENV_CACHE = _build_run_env()
-
-    if not _RUN_ENV_READY:
-        _RUN_SHELL = PersistentCmdShell(_RUN_ENV_CACHE)
-        _RUN_ENV_READY = True
-
-        def _close_shell_on_exit() -> None:
-            global _RUN_SHELL
-            try:
-                if _RUN_SHELL is not None:
-                    _RUN_SHELL.close()
-            finally:
-                _RUN_SHELL = None
-
-        atexit.register(_close_shell_on_exit)
-
-    if _RUN_SHELL is None or not _RUN_SHELL.is_alive():
-        _RUN_SHELL = PersistentCmdShell(_RUN_ENV_CACHE)
-
-    return _RUN_SHELL
-
-
 def run(
     cmd: str,
     *,
     extra_env: Optional[Dict[str, str]] = None,
-    capture_output: bool = False,
     check: bool = False,
 ):
-    """
-    TODO: Persistent Shell
-    """
-    global _RUN_SHELL
-    global _RUN_ENV_CACHE
-
-    merged_env = {str(k): str(v) for k, v in (extra_env or {}).items()}
-    last_error: Optional[Exception] = None
-
-    # 快速检测：若是简单的 "call <script>" 且脚本文件包含交互性 PAUSE/按任意键 提示，
-    # 则改为在新进程中直接运行并继承父终端（stdin/stdout），以便用户能按键继续。
-    if not capture_output:
-        try:
-            s = cmd.strip()
-            if s.lower().startswith("call "):
-                target = s[5:].strip()
-                if target.startswith('"') and target.endswith('"'):
-                    target = target[1:-1]
-                token = target.split()[0]
-                candidates = [token, token + ".bat", os.path.join(os.getcwd(), token), os.path.join(os.getcwd(), token + ".bat")]
-                found = None
-                for cand in candidates:
-                    if os.path.exists(cand) and os.path.isfile(cand):
-                        try:
-                            with open(cand, 'r', encoding='utf-8', errors='ignore') as f:
-                                text = f.read().lower()
-                                if 'pause' in text or '按任意键' in text or 'press any key' in text:
-                                    found = cand
-                                    break
-                        except Exception:
-                            continue
-                if found:
-                    env_for_run = (_RUN_ENV_CACHE.copy() if _RUN_ENV_CACHE else os.environ.copy())
-                    env_for_run.update(merged_env)
-                    try:
-                        cmd_to_run = cmd
-                        # Ensure @echo off is present so the batch doesn't echo commands
-                        if not cmd_to_run.strip().lower().startswith("@echo off"):
-                            cmd_to_run = f"@echo off & {cmd_to_run}"
-                        ret = subprocess.run(["cmd.exe", "/c", cmd_to_run], env=env_for_run, shell=False)
-                        return subprocess.CompletedProcess(args=cmd, returncode=ret.returncode, stdout=None, stderr=None)
-                    except Exception:
-                        # 如果以交互方式运行失败，则继续使用持久 shell
-                        pass
-        except Exception:
-            pass
-
-    for _attempt in range(2):
-        shell = _ensure_run_initialized()
-        try:
-            result, env_snapshot = shell.run_command(
-                cmd,
-                extra_env=merged_env if merged_env else None,
-                capture_output=capture_output,
-            )
-            if env_snapshot:
-                _RUN_ENV_CACHE = env_snapshot
-            break
-        except RuntimeError as e:
-            last_error = e
-            # Shell may be killed by an external script; recreate once and retry.
-            _RUN_SHELL = None
-            continue
-    else:
-        raise RuntimeError(f"run() failed after retry: {last_error}")
-
-    # 强制所有输出用 ansi (mbcs) 解码，彻底规避终端影响
-    if capture_output and result.stdout is not None:
-        try:
-            # 若已是 str，encode 再 decode，防止终端编码影响
-            result = subprocess.CompletedProcess(
-                args=result.args,
-                returncode=result.returncode,
-                stdout=result.stdout.encode("mbcs", errors="replace").decode("mbcs", errors="replace"),
-                stderr=result.stderr,
-            )
-        except Exception:
-            pass
-
-    if check and result.returncode != 0:
-        raise subprocess.CalledProcessError(
-            returncode=result.returncode,
-            cmd=cmd,
-            output=result.stdout,
-            stderr=result.stderr,
-        )
-    return result
-    """
-
-    # 这里已经舍去了很多初始化的东西，所以不需要再说每次都要初始化了 By 星旬
-    subprocess.run(["cmd.exe", "/v:on", "/c", f'''
-                    @echo off &
-                    setlocal enabledelayedexpansion 1>nul 2>nul &
-                    @{cmd} &
-                    endlocal 1>nul 2>nul &
-                    '''.replace("\n", "").replace(20*" ", "")])
-    """
+    subprocess.run(cmd, shell=True, env={**os.environ, **(extra_env or {})}, check=check, text=True, errors="replace")
 
 
 def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
@@ -511,13 +161,6 @@ def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
 
 
 def pause(message: str = "单击此字符或按任意键继续", style_override: Optional[Style] = None, timeout: Optional[float] = None) -> None:
-    """显示一个短暂的提示，等待任意键或鼠标/触摸点击继续。
-
-    向 `src/menu.py` 的 `pause` 保持一致：
-    - 支持键盘任意按键确认。
-    - 支持鼠标/触摸点击确认。
-    - 可选 `timeout`（秒）在超时后自动继续。
-    """
     def _console_pause(msg: str, to: Optional[float]):
         sys.stdout.write(msg)
         sys.stdout.flush()
@@ -526,8 +169,6 @@ def pause(message: str = "单击此字符或按任意键继续", style_override:
             return
         # Windows
         try:
-            import msvcrt
-
             start = time.time()
             if to is None:
                 msvcrt.getwch()
@@ -541,15 +182,11 @@ def pause(message: str = "单击此字符或按任意键继续", style_override:
                     time.sleep(0.05)
             print()
             return
-        except Exception:
+        except NameError:
             pass
 
         # POSIX
         try:
-            import termios
-            import tty
-            import select
-
             fd = sys.stdin.fileno()
             old_attrs = termios.tcgetattr(fd)
             try:
@@ -564,14 +201,14 @@ def pause(message: str = "单击此字符或按任意键继续", style_override:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
             print()
             return
-        except Exception:
+        except NameError:
             pass
 
         # Fallback to input()
         try:
             input()
         except Exception:
-            pass
+            time.sleep(to or 2)
 
     # If not a tty, do a simple console pause
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -654,12 +291,6 @@ def check_adb_server() -> Tuple[bool, Optional[Exception]]:
         return False, e
     adb_server.close()
     return True, None
-
-
-""" CONFIGURATION/BUILD FUNCTIONS """
-
-def debug_features_allowed() -> bool:
-    return DEBUG
 
 
 """ UI/MENU FUNCTIONS """
@@ -886,7 +517,6 @@ def choose(message: str, options: Iterable[Option], default: Optional[str] = Non
 
 @onerror
 def menu() -> str:
-    global CURRENT_BUILD_META
     if os.path.exists("mod") and os.path.isdir("mod"):
         print_formatted_text(HTML("已加载扩展列表："), style=style) if len(os.listdir("mod")) != 0 else print_formatted_text(HTML("已加载扩展列表：未加载任何扩展"), style=style)
         if len(os.listdir("mod")) != 0:
@@ -907,8 +537,7 @@ def menu() -> str:
     print_formatted_text(ANSI("鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能"))
 
     # Compose header with embedded softversion if available.
-    version_str = CURRENT_BUILD_META.get("ro.product.current.softversion") or ""
-    header = f"AllToolBox {version_str} 控制台&主菜单 by xgj_236" if version_str else "AllToolBox 控制台&主菜单 by xgj_236"
+    header = "AndroidToolkit 控制台&主菜单"
 
     options = [
         Option("onekeyroot", "一键Root"),
@@ -943,9 +572,9 @@ def menu() -> str:
 def sel():
     clear()
     run("call sel file s .")
-    run("pause")
+    pause("已选择文件，按任意键继续...")
     run("call sel file m .")
-    run("pause")
+    pause("已选择文件，按任意键继续...")
 
 
 @onerror
@@ -1157,10 +786,9 @@ def commonly():
             Option("7", "进入qmmi[9008]"),
             Option("8", "scrcpy投屏"),
             Option("9", "高级重启"),
+            Option("10", "刷入AnyKernel3[实验性]"),
             Option("11", "开启无线调试")
         ]
-        if DEBUG:
-            commonly_list.append(Option("10", "刷入AnyKernel3[实验性]"))
         result = choose(
             message="常用合集",
             options=commonly_list,
@@ -1225,11 +853,6 @@ def magisk():
 @onerror
 @auto_clear(logo=True, end=True)
 def debug():
-    global allow_xtc
-    if not DEBUG:
-        print_formatted_text(HTML(ERROR + "当前为 Release 构建，DEBUG 菜单不可用"), style=style)
-        time.sleep(1)
-        return
     while True:
         result = choose(
             message="DEBUG菜单",
@@ -1239,8 +862,7 @@ def debug():
                 Option("2", "调整为未使用状态"),
                 Option("3", "调整为使用状态"),
                 Option("4", "调整为更新状态"),
-                Option("5", "debug sel"),
-                Option("6", "允许使用部分一键root功能"),
+                Option("5", "debug sel")
             ],
             default="A"
         )
@@ -1257,11 +879,6 @@ def debug():
                 open("whoyou.txt", "w").write("3")
             case "5":
                 sel()
-            case "6":
-                allow_xtc = True
-                print_formatted_text(HTML(INFO + "已允许使用部分一键root功能"), style=style)
-                time.sleep(1)
-
 
 @onerror
 @auto_clear(logo=True, end=True)
@@ -1432,22 +1049,10 @@ def about():
 
 @onerror
 def pre_main() -> bool:
-    global allow_xtc
     global flag
     global logger
-    global DEBUG
-    global CURRENT_BUILD_META
-    # 这是我在这里最后的痕迹，不要删除，希望以后你们能记得我还是贡献过的 --Starry2233
     colorama.init(autoreset=True, convert=True)
-    run("call .\\color.bat")
-    _PATHEXT: str = os.environ["PATHEXT"]
-    if not _PATHEXT.endswith(';'): _PATHEXT += ';'
-    _PATHEXT += ';'.join(_PATHEXT_EXTRA)
-    os.environ["PATHEXT"] = _PATHEXT
-    print(_PATHEXT)
-    if DEBUG:
-        print_formatted_text(HTML(WARN + "已启用调试模式 内部版本可能有未知问题"), style=style)
-        logger.debug("Debug mode is enabled")
+
     env_path_lower = (os.environ.get("PATH") or "").lower()
     keywords = ["windows", "system32", "powershell"]
     if not all(k in env_path_lower for k in keywords):
@@ -1455,9 +1060,7 @@ def pre_main() -> bool:
         answer = input().strip().lower()
         if answer != "no":
             return False
-
-    softver = CURRENT_BUILD_META.get("ro.product.current.softversion") or ""
-    title = f"AllToolBox {softver} by xgj_236" if softver else "AllToolBox by xgj_236"
+    title = "AndroidToolkit"
     set_title(title)
     os.makedirs("mod", exist_ok=True)
     for item in os.listdir("mod"):
@@ -1477,80 +1080,10 @@ def pre_main() -> bool:
     except Exception:
         logger.exception("Failed to change working directory to bin; continuing")
 
-    def _run_if_present(base_name: str):
-        try:
-            if os.path.exists(base_name) or os.path.exists(base_name + ".bat"):
-                run(f"call {base_name}")
-            else:
-                logger.debug("%s not found; skipping", base_name)
-        except Exception:
-            logger.exception("Error running %s", base_name)
-
-    _run_if_present("withone")
-    _run_if_present("afterup")
     if os.path.exists("..\\bugjump.7z"):
         os.remove("..\\bugjump.7z")
     if os.path.exists("..\\repair.exe"):
         os.remove("..\\repair.exe")
-    if os.getenv("ATB_SKIP_UPDATE", "0") != "1":
-        print_formatted_text(HTML(INFO + "正在检查更新..."), style=style)
-        try:
-            meta_update = CURRENT_BUILD_META
-            is_debug_build = DEBUG
-            base = "https://raw.githubusercontent.com/xgj236/AllToolBox/main"
-            version_tmp_url = f"{base}/versiontmp.txt"
-            if is_debug_build:
-                version_tmp_url = f"{base}/betaversiontmp.txt"
-
-            local_path = "bugversion.txt"
-            if not os.path.exists(local_path):
-                with open(local_path, "w") as bv:
-                    bv.write("0")
-
-            with open(local_path, "r") as fv:
-                try:
-                    filev = int(fv.read().strip())
-                except ValueError:
-                    filev = 0
-
-            resp = requests.get(
-                version_tmp_url,
-                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36)'},
-                timeout=8
-            )
-            resp.raise_for_status()
-            try:
-                webv = int(resp.text.strip())
-            except ValueError:
-                webv = filev
-
-            if webv > filev:
-                new_version = meta_update.get("ro.product.current.softversion", "") if meta_update else ""
-                if not new_version:
-                    try:
-                        vt = requests.get(
-                            version_tmp_url,
-                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36)'},
-                            timeout=8
-                        )
-                        vt.raise_for_status()
-                        new_version = vt.text.strip()
-                    except Exception:
-                        new_version = ""
-                print_formatted_text(HTML(WARN + "当前补丁版本过时，必须更新"), style=style)
-                if new_version:
-                    print_formatted_text(HTML(INFO + f"最新补丁版本：{new_version}"), style=style)
-                print_formatted_text(HTML(INFO + "单击此字符或按任意键继续开始更新..."), style=style)
-                pause()
-                shutil.copy2("repair.exe", "..\\repair.exe")
-                os.chdir("..\\")
-                subprocess.run(["cmd", "/c", "start", "repair.exe"])
-                cleanup(2)
-        except Exception:
-            pass
-        run("call upall.bat run")
-        """fucking xtc"""
-    """allow_xtc = True"""
 
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
         print_formatted_text(HTML(INFO + "正在检查Windows属性..."), style=style)
@@ -1573,25 +1106,16 @@ def pre_main() -> bool:
             pause()
             return False
         print_formatted_text(HTML(INFO + f"当前系统: {os_name} {os_release}"), style=style)
+        if subprocess.run(["where", "adb.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True).returncode != 0:
+            print_formatted_text(HTML(ERROR + "未找到 ADB 可执行文件"), style=style)
+            pause()
+            return False
         adb_process = subprocess.Popen(["adb.exe", "version"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=True)
         adb_process.wait()
         if adb_process.returncode != 0:
             print_formatted_text(HTML(ERROR + f"ADB检查失败，返回值：{adb_process.returncode}"), style=style)
             return False
         print_formatted_text(HTML(INFO + "检查ADB命令成功"), style=style)
-    whoyou = open("whoyou.txt", "w", encoding="gbk")
-    whoyou.write("2")
-    whoyou.close()
-    print_formatted_text(HTML(f"""{WARN}关于解绑：该工具不提供手表强制解绑服务，如您拾取他人的手表，请联系当地110公安机关归还失主。手表解绑属于非法行为，请归还失主。而不要尝试通过任何手段解除挂失锁
-        {WARN}关于收费：这个工具是完全免费的，如果你付费购买了那么请退款
-        {WARN}本脚本部分功能可能造成侵权问题，并可能受到法律追究，所以仅供个人使用，请勿用于商业用途
-        {INFO}---请永远相信我们能给你带来免费又好用的工具---
-        {INFO}关于官网：https://atb.xgj.qzz.io
-        {INFO}关于作者：本脚本由快乐小公爵236等作者制作
-        {INFO}作者QQ：3247039462
-        {INFO}工具箱交流与反馈QQ群：907491503
-        {INFO}作者哔哩哔哩账号：https://b23.tv/L54R5ZV
-        {INFO}bug与建议反馈邮箱：ATBbug@xgj.qzz.io""".replace(" " * 8, "")), style=style)
     print_formatted_text(HTML(INFO + "单击此字符或按任意键继续进入主界面"), style=style)
 
     pause()
@@ -1608,22 +1132,16 @@ def cleanup(code: int = 0):
     sys.exit(code)
 
 
-class AllToolBox(object):
+class AndroidToolkit(object):
     """High-level controller for preflight, menu loop, and action dispatch."""
 
-    def __init__(self) -> None:
-        self._debug_allowed = debug_features_allowed()
-
+    def __init__(self) -> None: ...
     def _run_pre_main(self) -> bool:
         return pre_main() if not flag else True
 
     def _handle_action(self, action: str) -> Optional[int]:
         if action == "SHIFT_D":
-            if self._debug_allowed:
-                debug()
-            else:
-                print_formatted_text(HTML(ERROR + "当前为 Release 构建，DEBUG 功能已禁用"), style=style)
-                time.sleep(1)
+            debug()
             return None
         if action == "onekeyroot":
             root()
@@ -1680,7 +1198,7 @@ class AllToolBox(object):
 
 @onerror
 def main() -> int:
-    return AllToolBox().run()
+    return AndroidToolkit().run()
 
 
 if __name__ == "__main__":
@@ -1694,19 +1212,6 @@ if __name__ == "__main__":
     formatter = MultilineFormatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
-
-    # Initialize cloud-control detection at startup: if the endpoint is
-    # unreachable, cloud control features will be disabled for this run.
-    try:
-        import menu as _menu
-        try:
-            _menu.init_cloud_control()
-        except Exception:
-            # If init fails, ensure cloud control is treated as disabled for this run
-            pass
-    except Exception:
-        # If importing menu fails, ignore and continue startup
-        pass
 
     exit_code = main()
     logger.debug("ATBExitEvent, main returned: %s", exit_code)
