@@ -148,8 +148,8 @@ int main(int argc, wchar_t* argv[])
     SetConsoleOutputCP(936);
     for (int i = 0; i <= 3; ++i)
     {
-        ClearScreen();
         std::cout << "\r\n" << std::flush;
+        ClearScreen();
     }
 #endif
 

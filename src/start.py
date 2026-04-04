@@ -7,43 +7,37 @@ import _cffi_backend # noqa: F401
 import logging
 import os
 import sys
-import shutil
 import platform
 import time
 import datetime
-import asyncio
-from typing import Optional, Tuple, Iterable, List, Dict, Any
+from typing import Optional, Tuple, List, Dict
 from prompt_toolkit import (
     print_formatted_text,
     ANSI,
     HTML,
-    prompt,
-    PromptSession
+    prompt
 )
 from prompt_toolkit.styles import Style, merge_styles
 from prompt_toolkit.shortcuts import clear, set_title
-from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
-from prompt_toolkit.mouse_events import MouseEventType, MouseButton
+from prompt_toolkit.mouse_events import MouseEventType
 from functools import wraps
 from flash_ak3 import AnyKernel3
-from musicplayer import AudioPlayer
+from utils.menu import choose, Option
+from utils.lang import t, set_lang
 import colorama
 import subprocess
 import socket
-import requests
-import filehash
-import json
 import traceback
-import locale
 import threading
-import uuid
-import atexit
-import pluginutils, pluginutils.load, pluginutils.manage
+# TODO: Plugin system
+import pluginutils, pluginutils.load, pluginutils.manage # noqa: F401
+import argparse
 try:
     import msvcrt
 except ImportError:
@@ -68,9 +62,17 @@ style = Style.from_dict({
     "selected-option": "fg:#e6edf3 bold underline",
 })
 
-INFO = "<info>[信息]</info>"
-ERROR = "<red>[错误]</red>"
-WARN = "<orange>[警告]</orange>"
+_labels_cache = {}
+INFO = ""
+ERROR = ""
+WARN = ""
+
+def _init_labels():
+    global INFO, ERROR, WARN
+    _labels_cache.clear()
+    INFO = f"<info>{t('[信息]', '[INFO]')}</info>"
+    ERROR = f"<error>{t('[错误]', '[ERROR]')}</error>"
+    WARN = f"<orange>{t('[警告]', '[WARN]')}</orange>"
 
 flag = False
 key = False
@@ -89,28 +91,7 @@ class MultilineFormatter(logging.Formatter):
         return '\n'.join([lines[0]] + [prefix + line for line in lines[1:]])
 
 
-class BreakOut(Exception):
-    pass
-
-
 """ UTILITY FUNCTIONS """
-
-def page_transition(text: str = "", duration: float = 0.35) -> None:
-    """Simple console transition animation when switching pages."""
-    msg = text.strip() or "正在切换..."
-    frames = ["", ".", "..", "...", " ..", "  ."]
-    end_time = time.monotonic() + duration
-    width = len(msg) + 4
-    while time.monotonic() < end_time:
-        for frame in frames:
-            if time.monotonic() >= end_time:
-                break
-            sys.stdout.write(f"\r{msg}{frame:<3}")
-            sys.stdout.flush()
-            time.sleep(max(duration / (len(frames) * 2), 0.02))
-    sys.stdout.write("\r" + " " * width + "\r")
-    sys.stdout.flush()
-
 
 def onerror(fn):
     @wraps(fn)
@@ -133,7 +114,8 @@ def auto_clear(fn=None, *, logo=False, end=False):
         def wrapper(*args, **kwargs):
             clear()
             if logo:
-                run("call .\\logo.bat")
+                # TODO: 恢复外部批处理调用: run("call .\\logo.bat")
+                pass
             result = func(*args, **kwargs)
             if end: clear()
             return result
@@ -160,7 +142,7 @@ def checkwin() -> Tuple[str, str, str, Tuple[str, str]]:
     )
 
 
-def pause(message: str = "单击此字符或按任意键继续", style_override: Optional[Style] = None, timeout: Optional[float] = None) -> None:
+def pause(message: str = "Click or press any key to continue", style_override: Optional[Style] = None, timeout: Optional[float] = None) -> None:
     def _console_pause(msg: str, to: Optional[float]):
         sys.stdout.write(msg)
         sys.stdout.flush()
@@ -295,264 +277,39 @@ def check_adb_server() -> Tuple[bool, Optional[Exception]]:
 
 """ UI/MENU FUNCTIONS """
 
-def menu_choice(
-    message: str,
-    options: Iterable[Tuple[Any, str]],
-    default: Optional[str] = None,
-    style_override: Optional[Style] = None,
-    extra_bindings: Optional[KeyBindings] = None,
-    header_text: Optional[str] = None,
-    header_click_callback=None,
-):
-    option_list: List[Tuple[Any, str]] = list(options)
-    if not option_list:
-        raise ValueError("menu_choice requires at least one option")
-
-    selected_index = 0
-    display_index = 0
-    animate_in = True
-    visible_count = 0 if animate_in else len(option_list)
-    move_task = None
-    header_rows = 1 if header_text else 0
-
-    if default is not None:
-        for idx, (value, _label) in enumerate(option_list):
-            if value == default:
-                selected_index = idx
-                display_index = idx
-                break
-
-    kb = KeyBindings()
-
-    @kb.add("enter", eager=True)
-    @kb.add(" ", eager=True)
-    def _(event):
-        idx = selected_index or 0
-        event.app.exit(result=option_list[idx][0])
-
-    digit_buf = {"text": "", "t": 0.0}
-
-    def _select_by_number(event, digit: str) -> None:
-        now = time.monotonic()
-        if now - digit_buf["t"] > 0.2:
-            digit_buf["text"] = ""
-        digit_buf["text"] += digit
-        digit_buf["t"] = now
-        try:
-            idx = int(digit_buf["text"]) - 1
-        except ValueError:
-            return
-        if 0 <= idx < len(option_list):
-            _set_selection(idx, event.app)
-
-    for d in "0123456789":
-        @kb.add(d, eager=True)
-        def _(event, _d=d):
-            _select_by_number(event, _d)
-
-    def _clamp(idx: int) -> int:
-        count = len(option_list)
-        return max(0, min(count - 1, idx))
-
-    def _animate_move(target: int, app):
-        nonlocal display_index, move_task
-        if move_task and not move_task.done():
-            move_task.cancel()
-
-        async def _run():
-            nonlocal display_index
-            while display_index != target:
-                step = 1 if display_index < target else -1
-                display_index += step
-                app.invalidate()
-                await asyncio.sleep(0.02)
-            app.invalidate()
-
-        move_task = app.create_background_task(_run())
-
-    def _set_selection(idx: int, app):
-        nonlocal selected_index, display_index
-        selected_index = _clamp(idx)
-        _animate_move(selected_index, app)
-
-    @kb.add("up")
-    @kb.add("k")
-    def _(event):
-        _set_selection(selected_index - 1, event.app)
-
-    @kb.add("down")
-    @kb.add("j")
-    def _(event):
-        _set_selection(selected_index + 1, event.app)
-
-    last_click = {"idx": None, "t": 0.0}
-
-    def mouse_handler(mouse_event):
-        nonlocal selected_index
-        # You can add MouseEventType.MOUSE_MOVE event type to allow mouse-move-select.
-        if mouse_event.event_type != MouseEventType.MOUSE_UP:
-            return NotImplemented
-
-        y = mouse_event.position.y
-        if header_rows and y == 0:
-            if header_click_callback:
-                header_click_callback()
-            return None
-
-        if header_rows:
-            y -= header_rows
-        current_len = visible_count if animate_in else len(option_list)
-        if current_len == 0:
-            return None
-        if 0 <= y < current_len:
-            _set_selection(y, get_app())
-
-        if mouse_event.event_type == MouseEventType.MOUSE_UP and mouse_event.button == MouseButton.LEFT:
-            now = time.monotonic()
-            idx = selected_index
-            if idx == last_click["idx"] and (now - last_click["t"]) <= 0.5:
-                value = option_list[idx][0]
-                get_app().exit(result=value)
-            last_click["idx"] = idx
-            last_click["t"] = now
-        return None
-
-    def render_lines():
-        fragments = []
-        if header_text:
-            fragments.append(("class:menu-header", header_text))
-            fragments.append(("", "\n"))
-
-        current_len = visible_count if animate_in else len(option_list)
-        if current_len == 0:
-            current_len = 1
-        current_len = min(current_len, len(option_list))
-        sel = min(display_index, current_len - 1)
-
-        for idx, (_, label) in enumerate(option_list[:current_len]):
-            pointer = ">" if idx == sel else " "
-            prefix = f" {pointer} " if idx == sel else "   "
-            text = f"{prefix}{idx + 1}. {label}"
-            style_class = "class:radio-selected" if idx == sel else "class:radio"
-            fragments.append((style_class, text))
-            if idx != current_len - 1:
-                fragments.append(("", "\n"))
-        return fragments
-
-    class MenuControl(FormattedTextControl):
-        def __init__(self, render_fn, handler):
-            super().__init__(render_fn, focusable=True, show_cursor=False)
-            self._handler = handler
-
-        def mouse_handler(self, mouse_event):
-            return self._handler(mouse_event)
-
-    control = MenuControl(render_lines, mouse_handler)
-    window = Window(content=control, always_hide_cursor=True, dont_extend_width=True, dont_extend_height=True)
-
-    radio_style = Style.from_dict(
-        {
-            "radio-list": "",
-            "radio": "fg:#cbd6e2",
-            "radio-selected": "fg:#e6edf3 bold underline",
-            "radio-checked": "fg:#7ad1a8",
-            "radio-number": "fg:#9dcffb bold",
-        }
-    )
-
-    app_style = merge_styles([style_override, radio_style]) if style_override else radio_style
-
-    kb_final = merge_key_bindings([kb, extra_bindings]) if extra_bindings else kb
-
-    app = Application(
-        layout=Layout(window, focused_element=control),
-        key_bindings=kb_final,
-        mouse_support=True,
-        full_screen=False,
-        style=app_style,
-    )
-
-    if animate_in:
-        async def _animate_in():
-            nonlocal visible_count, selected_index
-            for i in range(1, len(option_list) + 1):
-                visible_count = i
-                if selected_index >= visible_count:
-                    selected_index = visible_count - 1
-                get_app().invalidate()
-                await asyncio.sleep(0.03)
-
-        def _schedule_animate_in() -> None:
-            app.create_background_task(_animate_in())
-
-        app.pre_run_callables.append(_schedule_animate_in)
-
-    result = app.run()
-    if result is None:
-        sel = selected_index or 0
-        result = option_list[sel][0]
-    return result
-
-
-class Option:
-    def __init__(self, value, label):
-        self.value = value
-        self.label = label
-
-
-def choose(message: str, options: Iterable[Option], default: Optional[str] = None,
-           extra_bindings: Optional[KeyBindings] = None, header_text: Optional[str] = None,
-           header_click_callback=None):
-    page_transition(message or "正在切换...")
-    return menu_choice(
-        message=message,
-        options=[(opt.value, opt.label) for opt in options],
-        default=default,
-        style_override=style,
-        extra_bindings=extra_bindings,
-        header_text=header_text,
-        header_click_callback=header_click_callback,
-    )
-
 
 @onerror
 def menu() -> str:
     if os.path.exists("mod") and os.path.isdir("mod"):
-        print_formatted_text(HTML("已加载扩展列表："), style=style) if len(os.listdir("mod")) != 0 else print_formatted_text(HTML("已加载扩展列表：未加载任何扩展"), style=style)
+        print_formatted_text(HTML(t("已加载扩展列表：", "Loaded Mods:")), style=style) if len(os.listdir("mod")) != 0 else print_formatted_text(HTML(t("已加载扩展列表：未加载任何扩展", "Loaded Mods: No mods loaded")), style=style)
         if len(os.listdir("mod")) != 0:
             i: int = 1
             for item in os.listdir("mod"):
                 print_formatted_text(f"{i}. {item}", style=style)
                 i += 1
     else:
-        # print_formatted_text(HTML(WARN + "扩展文件夹没有创建，正在创建..."), style=style)
         os.remove("mod") if os.path.isfile("mod") else ...
         os.makedirs("mod", exist_ok=True)
-    kb = KeyBindings()
 
-    @kb.add('D')
-    def _(event):
-        event.app.exit(result="SHIFT_D")
+    print_formatted_text(ANSI(t("鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能", "Double-click/Enter to confirm, arrows/numbers/click to select")))
 
-    print_formatted_text(ANSI("鼠标双击或按回车键确定，方向键，数字键，鼠标单击来选择功能"))
-
-    # Compose header with embedded softversion if available.
-    header = "AndroidToolkit 控制台&主菜单"
+    header = t("AndroidToolkit 控制台&主菜单", "AndroidToolkit Console & Main Menu")
 
     options = [
-        Option("onekeyroot", "一键Root"),
-        Option("gbl", "粗粮高通机型临时Root&强解bl"),
-        Option("openshell", "在此处打开cmd[含adb环境]"),
-        Option("about", "关于脚本"),
-        Option("mods", "扩展管理"),
-        Option("commonly", "常用合集[子菜单]"),
-        Option("help-links", "链接合集[子菜单]"),
-        Option("man-apps", "应用管理[子菜单]"),
-        Option("magisk-mod", "magisk模块管理[子菜单]"),
-    ]
-    options.append(Option("user-debug", "高级菜单[子菜单]"))
-    options.append(Option("exit", "退出工具"))
+        Option("onekeyroot", t("一键Root", "One-Click Root")),
+        Option("gbl", t("粗粮高通机型临时Root&强解bl", "Temporary Root & BL Unlock (Qualcomm)")),
+        Option("openshell", t("在此处打开cmd[含adb环境]", "Open CMD here (with ADB)")),
+        Option("about", t("关于脚本", "About")),
+        Option("mods", t("扩展管理", "Extensions")),
+        Option("commonly", t("常用合集[子菜单]", "Common Tools [Submenu]")),
 
+        Option("man-apps", t("应用管理[子菜单]", "App Manager [Submenu]")),
+        Option("magisk-mod", t("Magisk模块管理[子菜单]", "Magisk Modules [Submenu]")),
+    ]
+    options.append(Option("user-debug", t("高级菜单[子菜单]", "Advanced [Submenu]")))
+    options.append(Option("exit", t("退出工具", "Exit")))
+
+    kb = KeyBindings()
     result = choose(
         message="",
         options=options,
@@ -572,9 +329,9 @@ def menu() -> str:
 def sel():
     clear()
     run("call sel file s .")
-    pause("已选择文件，按任意键继续...")
+    pause(t("已选择文件，按任意键继续...", "File selected, press any key to continue..."))
     run("call sel file m .")
-    pause("已选择文件，按任意键继续...")
+    pause(t("已选择文件，按任意键继续...", "File selected, press any key to continue..."))
 
 
 @onerror
@@ -639,31 +396,31 @@ def anykernel3():
     }
 
     while True:
-        print_formatted_text(HTML(WARN + "目前仅支持boot.img修补，并可能存在未知问题！"), style=style)
+        print_formatted_text(HTML(WARN + t("目前仅支持boot.img修补，并可能存在未知问题！", "Only boot.img patching is supported, may have unknown issues!")), style=style)
         result = choose(message="", options=[
-            Option("A", "返回上级菜单"),
-            Option("1", "A-only槽位"),
-            Option("2", "AB分区-A槽位"),
-            Option("3", "AB分区-B槽位")
+            Option("A", t("返回上级菜单", "Back")),
+            Option("1", t("A-only槽位", "A-only Slot")),
+            Option("2", t("AB分区-A槽位", "AB Partition - Slot A")),
+            Option("3", t("AB分区-B槽位", "AB Partition - Slot B"))
         ], default="A")
         if result == "A":
             clear()
             return
         if result not in mapping:
-            print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
+            print_formatted_text(HTML(ERROR + t("输入错误，请重新输入", "Invalid input, please try again")), style=style)
             continue
 
         src_partition, dst_partition = mapping[result]
         if not _extract_boot_to_tmp(paths, src_partition):
-            print_formatted_text(HTML(ERROR + "提取Boot失败"), style=style)
+            print_formatted_text(HTML(ERROR + t("提取Boot失败", "Failed to extract boot")), style=style)
             continue
-        print_formatted_text(HTML(INFO + "请加载AnyKernel3 Zip"), style=style)
+        print_formatted_text(HTML(INFO + t("请加载AnyKernel3 Zip", "Please load AnyKernel3 Zip")), style=style)
         run("call sel file s .")
         with open("./tmp/output.txt", "r", encoding="utf-8") as f:
             filepath = f.read().rstrip("\r\n").rstrip("\n")
         flash_anykernel3(filepath, "./tmp/boot.img")
         flash_partation("./tmp/boot_patched.img", dst_partition)
-        print_formatted_text(HTML(INFO + "刷入成功"), style=style)
+        print_formatted_text(HTML(INFO + t("刷入成功", "Flash successful")), style=style)
 
 
 """ FEATURE MENU HANDLERS """
@@ -673,11 +430,10 @@ def anykernel3():
 def root():
     while True:
         result = choose(
-            message="一键Root菜单",
+            message=t("一键Root菜单", "One-Click Root Menu"),
             options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "Wear一键Root"),
-                Option("2", "手机通用Root"),
+                Option("A", t("返回上级菜单", "Back")),
+                Option("1", t("手机通用Root", "Android Phone Generic Root")),
             ],
             default="A"
         )
@@ -685,12 +441,8 @@ def root():
             case "A":
                 return
             case "1":
-                ato = AudioPlayer(os.path.join(".", "music"))
-                ato.play_audio(auto_next=True)
-                run("call root.bat"); clear()
-                ato.stop_audio()
-            case "2":
-                run("call otherroot.bat 3"); clear()
+                # TODO: 恢复外部批处理调用: run("call otherroot")
+                ...
 
 
 @onerror
@@ -704,29 +456,23 @@ def qcom_gbl():
 def appset():
     while True:
         result = choose(
-            message="应用管理菜单",
+            message=t("应用管理菜单", "App Manager Menu"),
             options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "安装应用"),
-                Option("2", "卸载应用"),
-                Option("3", "安装状态栏悬浮窗"),
-                Option("4", "设置微信QQ为开机自启应用"),
-                Option("5", "解除z10 V2版本安装限制-V3不适用"),
+                Option("A", t("返回上级菜单", "Back")),
+                Option("1", t("安装应用", "Install App")),
+                Option("2", t("卸载应用", "Uninstall App"))
             ],
             default="A"
         )
-        if result == "A":
-            return
-        if result == "1":
-            run("call userinstapp")
-        if result == "2":
-            run("call unapp")
-        if result == "3":
-            run("call xtcztl")
-        if result == "4":
-            run("call qqwxautestart")
-        if result == "5":
-            run("call z10openinst")
+        match result:
+            case "A":
+                return
+            case "1":
+                # TODO: run("call userinstapp")
+                clear()
+            case "2":
+                # TODO:  run("call unapp")
+                clear()
 
 
 @onerror
@@ -736,94 +482,68 @@ def userdebug():
         result = choose(
             message="Advanced Options",
             options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "设备信息"),
-                Option("2", "打开充电可用"),
-                Option("3", "型号与innermodel对照表"),
-                Option("4", "导入本地root文件"),
-                Option("5", "一键root[不刷userdata]"),
-                Option("6", "恢复出厂设置[不是超级恢复][Root后禁用]"),
-                Option("7", "开机自刷Recovery"),
-                Option("8", "强制加好友[已失效]"),
-            ],
-            default="A"
+                Option("A", t("返回上级菜单", "Back")),
+                Option("1", t("设备信息", "Device Info")),
+                Option("2", t("导入本地root文件", "Import Local Root Files")),
+                Option("3", t("恢复出厂设置", "Factory Reset"))
+                ],
+                default="A"
         )
-
-        if result == "A":
-            return
-        if result == "1":
-            run("call listbuild"); clear();run("call logo")
-        if result == "2":
-            run("call opencharge"); clear();run("call logo")
-        if result == "3":
-            run("call innermodel")
-            print_formatted_text(HTML(INFO + "单击此字符或按任意键继续返回上级菜单"), style=style)
-            pause(); clear();run("call logo")
-        if result == "4":
-            run("call pashroot"); clear();run("call logo")
-        if result == "5":
-            run("call root nouserdata"); clear();run("call logo")
-        if result == "6":
-            run("call miscre"); clear();run("call logo")
-        if result == "7":
-            run("call pashtwrppro"); clear();run("call logo")
-        if result == "8":
-            run("call friend"); clear();run("call logo")
-
+        match result:
+            case "A":
+                return
+            case "1":
+                # TODO device info implementation
+                clear()
+            case "2":
+                # TODO import root files implementation
+                clear()
+            case "3":
+                # TODO factory reset implementation
+                clear()
 
 @onerror
 @auto_clear(logo=True, end=True)
 def commonly():
     while True:
         commonly_list: List[Option] = [
-            Option("A", "返回上级菜单"),
-            Option("1", "ADB/自检校验码计算"),
-            Option("2", "离线OTA升级"),
-            Option("3", "刷入TWRP"),
-            Option("4", "刷入XTC Patch"),
-            Option("5", "备份与恢复"),
-            Option("6", "安卓8.1root后优化"),
-            Option("7", "进入qmmi[9008]"),
-            Option("8", "scrcpy投屏"),
-            Option("9", "高级重启"),
-            Option("10", "刷入AnyKernel3[实验性]"),
-            Option("11", "开启无线调试")
+            Option("A", t("返回上级菜单", "Back")),
+            Option("1", t("刷入第三方Recovery", "Flash Custom Recovery")),
+            Option("2", t("备份与恢复", "Backup & Restore")),
+            Option("3", t("scrcpy投屏", "scrcpy Screen Mirroring")),
+            Option("4", t("高级重启", "Advanced Reboot")),
+            Option("5", t("刷入AnyKernel3[实验性]", "Flash AnyKernel3 [Experimental]")),
+            Option("6", t("开启无线调试", "Enable Wireless Debugging"))
         ]
         result = choose(
-            message="常用合集",
+            message=t("常用合集", "Common Tools"),
             options=commonly_list,
             default="A"
         )
         match result:
             case "A":
                 return
-            case "1":
-                run("powershell -ExecutionPolicy Bypass -File zj.ps1")
             case "2":
-                run("call ota")
+                # TODO ota
+                clear()
             case "3":
-                run("call pashtwrp")
-            case "4":
-                run("call xtcpatch")
+                # TODO twrp flash
+                clear()
             case "5":
-                run("call backup")
-            case "6":
-                run("call rootpro")
-            case "7":
-                run("call qmmi")
-                print_formatted_text(HTML(INFO + "单击此字符或按任意键继续返回上级菜单"), style=style)
-                pause()
+                # TODO backup & restore
+                clear()
             case "8":
-                run("call scrcpy-ui.bat")
+                subprocess.Popen("scrcpy.exe", text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                clear()
             case "9":
-                run("call rebootpro")
+                # TODO advanced reboot
+                clear()
             case "10":
                 clear()
                 anykernel3()
             case "11":
-                run("call wifiadb")
-            case _:
-                print_formatted_text(HTML(ERROR + "输入错误，请重新输入"), style=style)
+                # TODO wifiadb
+                clear()
 
 
 @onerror
@@ -831,119 +551,43 @@ def commonly():
 def magisk():
     while True:
         result = choose(
-            message="magisk模块管理",
+            message=t("magisk模块管理", "Magisk Module Manager"),
             options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "刷入Magisk模块"),
-                # Option("2", "刷入LSPosed-Android8.1机型"),
-                Option("3", "刷入Xposed框架-适用于安卓4.4.4和7.1.1"),
+                Option("A", t("返回上级菜单", "Back")),
+                Option("1", t("刷入Magisk模块", "Flash Magisk Module")),
+                Option("2", t("刷入Xposed框架", "Flash Xposed Framework")),
             ],
             default="A"
         )
         if result == "A":
             return
         if result == "1":
-            run("call userinstmodule"); clear();run("call logo")
+            # TODO Module Manager
+            clear()
         if result == "2":
-            run("call InstLSPosed810"); clear();run("call logo")
-        if result == "3":
-            run("call Xposed"); clear();run("call logo")
+            # TODO Xposed Installer
+            clear()
 
 
-@onerror
-@auto_clear(logo=True, end=True)
-def debug():
-    while True:
-        result = choose(
-            message="DEBUG菜单",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "色卡"),
-                Option("2", "调整为未使用状态"),
-                Option("3", "调整为使用状态"),
-                Option("4", "调整为更新状态"),
-                Option("5", "debug sel")
-            ],
-            default="A"
-        )
-        match result:
-            case "A":
-                return
-            case "1":
-                color()
-            case "2":
-                open("whoyou.txt", "w").write("1")
-            case "3":
-                open("whoyou.txt", "w").write("2")
-            case "4":
-                open("whoyou.txt", "w").write("3")
-            case "5":
-                sel()
-
-@onerror
-@auto_clear(logo=True, end=True)
-def help_menu():
-    while True:
-        result = choose(
-            message="帮助与链接",
-            options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "超级恢复文件下载"),
-                Option("2", "离线OTA下载"),
-                Option("3", "面具模块下载"),
-                Option("4", "APK下载"),
-                Option("5", "工具箱官网"),
-                Option("6", "开发文档"),
-                Option("7", "123云盘解除下载限制"),
-            ],
-            default="A"
-        )
-        match result:
-            case "A":
-                return
-            case "1":
-                run("start https://www.123865.com/s/Q5JfTd-hEbWH")
-            case "2":
-                run("start https://www.123865.com/s/Q5JfTd-HEbWH")
-            case "3":
-                run("start https://www.123684.com/s/Q5JfTd-cEbWH")
-            case "4":
-                run("start https://www.123684.com/s/Q5JfTd-ZEbWH")
-            case "5":
-                run("start https://atb.xgj.qzz.io")
-            case "6":
-                with open("开发文档.txt", "r", encoding="utf-8") as f:
-                    doc = f.read()
-                    print_formatted_text(HTML(doc), style=style)
-                kb = KeyBindings()
-                prompt(
-                    HTML(INFO + "单击此字符或按任意键继续返回上级菜单"),
-                    key_bindings=kb,
-                    style=style
-                )
-            case "7":
-                run("call patch123")
-
-
-""" MOD MANAGEMENT FUNCTIONS """ 
+""" MOD MANAGEMENT FUNCTIONS """
 
 def load_mod_menu():
     mod_dir = ".\\mod"
     if not os.path.isdir(mod_dir):
-        print_formatted_text(HTML(ERROR + "未找到 mod 目录"), style=style)
+        print_formatted_text(HTML(ERROR + t("未找到 mod 目录", "mod directory not found")), style=style)
         return None
 
     dirs = [d for d in os.listdir(mod_dir)
             if os.path.isdir(os.path.join(mod_dir, d))]
 
     if not dirs:
-        print_formatted_text(HTML(WARN + "未发现任何扩展"), style=style)
+        print_formatted_text(HTML(WARN + t("未发现任何扩展", "No mods found")), style=style)
         time.sleep(2)
         return None
 
     base = 10
     mapping = {}
-    options = [("A", "返回上级菜单")]
+    options = [("A", t("返回上级菜单", "Back"))]
 
     for i, name in enumerate(dirs, start=base + 1):
         key = str(i)
@@ -951,7 +595,7 @@ def load_mod_menu():
         options.append((key, name))
 
     result = choose(
-        message="已加载扩展",
+        message=t("已加载扩展", "Loaded Mod(s)"),
         options=[Option(value, label) for value, label in options],
         default="A"
     )
@@ -964,7 +608,8 @@ def load_mod_menu():
 
 @onerror
 def run_mod_main(modname):
-    run(f'cd /d mod\\{modname} && call main.bat')
+    # TODO load mod
+    ...
 
 
 @onerror
@@ -972,25 +617,26 @@ def run_mod_main(modname):
 def mod():
     while True:
         result = choose(
-            message="扩展管理",
+            message=t("扩展管理", "Extensions Manager"),
             options=[
-                Option("A", "返回上级菜单"),
-                Option("1", "运行已安装扩展"),
-                Option("2", "安装扩展"),
-                Option("3", "卸载扩展"),
+                Option("A", t("返回上级菜单", "Back")),
+                Option("1", t("运行已安装扩展", "Run Installed Extension")),
+                Option("2", t("安装扩展", "Install Extension")),
+                Option("3", t("卸载扩展", "Uninstall Extension")),
             ],
             default="A"
         )
-        if result == "A":
-            return
-        if result == "1":
-            modname = load_mod_menu()
-            if modname:
-                run_mod_main(modname)
-        if result == "2":
-            run("call mod")
-        if result == "3":
-            run("call unmod")
+        match result:
+            case "A":
+                return
+            case "1":
+                modname = load_mod_menu()
+                if modname:
+                    run_mod_main(modname)
+            case "2":
+                run("call mod")
+            case "3":
+                run("call unmod")
 
 
 """ MAIN FLOW FUNCTIONS """
@@ -999,64 +645,33 @@ def mod():
 @auto_clear(end=True)
 def about():
     print_formatted_text(
-        HTML(f"<yellow>{LINE}</yellow>"),
-        style=style
-    )
-
-    print_formatted_text(
-        HTML(INFO + "本脚本由快乐小公爵236等开发者制作"),
-        style=style
-    )
-
-    run("call thank.bat")
-
-    print_formatted_text(
-        HTML(INFO + "工具官网：https://atb.xgj.qzz.io"),
-        style=style
-    )
-    print_formatted_text(
-        HTML(INFO + "作者QQ：3247039462"),
-        style=style
-    )
-    print_formatted_text(
-        HTML(INFO + "工具箱交流与反馈QQ群：907491503"),
-        style=style
-    )
-    print_formatted_text(
-        HTML(INFO + "作者哔哩哔哩账号：https://b23.tv/L54R5ZV"),
-        style=style
-    )
-    print_formatted_text(
-        HTML(INFO + "bug与建议反馈邮箱：ATBbug@xgj.qzz.io"),
-        style=style
-    )
-
-    run("call uplog.bat")
-
-    print_formatted_text(
-        HTML(f"<yellow>{LINE}</yellow>"),
-        style=style
+        HTML(
+            "<cyan>AndroidToolkit</cyan> is a community-driven and open-source TUI tool"
+        )
     )
 
     kb = KeyBindings()
 
     prompt(
-        HTML(INFO + "单击此字符或按任意键继续返回上级菜单"),
+        HTML(INFO + t("单击此字符或按任意键继续返回上级菜单", "Click or press any key to go back")),
         key_bindings=kb,
         style=style
     )
 
 
 @onerror
-def pre_main() -> bool:
+def pre_main(lang: str) -> bool:
     global flag
     global logger
     colorama.init(autoreset=True, convert=True)
+    if not lang == "default":
+        set_lang(lang)
+    _init_labels()
 
     env_path_lower = (os.environ.get("PATH") or "").lower()
     keywords = ["windows", "system32", "powershell"]
     if not all(k in env_path_lower for k in keywords):
-        print_formatted_text(HTML(ERROR + "你的系统环境变量异常，这可能导致异常问题，输入no跳过"), style=style)
+        print_formatted_text(HTML(ERROR + t("你的系统环境变量异常，这可能导致异常问题，输入no跳过", "Abnormal system environment variables, input 'no' to skip")), style=style)
         answer = input().strip().lower()
         if answer != "no":
             return False
@@ -1080,13 +695,9 @@ def pre_main() -> bool:
     except Exception:
         logger.exception("Failed to change working directory to bin; continuing")
 
-    if os.path.exists("..\\bugjump.7z"):
-        os.remove("..\\bugjump.7z")
-    if os.path.exists("..\\repair.exe"):
-        os.remove("..\\repair.exe")
 
     if os.getenv("ATB_SKIP_PLATFORM_CHECK", "0") != "1":
-        print_formatted_text(HTML(INFO + "正在检查Windows属性..."), style=style)
+        print_formatted_text(HTML(INFO + t("正在检查Windows属性...", "Checking Windows properties...")), style=style)
         os_name, os_release, os_version, arch = checkwin()
         match arch[0]:
             case "64bit":
@@ -1095,30 +706,29 @@ def pre_main() -> bool:
                 arch = "x86"
             case _:
                 arch = "arm64-v8a"
-        print_formatted_text(HTML(INFO + f"当前运行环境:{os_name}{os_release}_{arch}_{os_version}"), style=style)
+        print_formatted_text(HTML(INFO + f"{t('当前运行环境', 'Current environment')}:{os_name}{os_release}_{arch}_{os_version}"), style=style)
         os_vercode = 0
         try:
             os_vercode = float(os_release)
         except ValueError:
             pass
         if os_vercode <= 7:
-            print_formatted_text(HTML(ERROR + "此脚本需要 Windows 8 或更高版本"), style=style)
-            pause()
+            print_formatted_text(HTML(ERROR + t("此脚本需要 Windows 8 或更高版本", "This script requires Windows 8 or higher")), style=style)
+            pause(t("按任意键退出", "Press any key to exit"))
             return False
-        print_formatted_text(HTML(INFO + f"当前系统: {os_name} {os_release}"), style=style)
+        print_formatted_text(HTML(INFO + f"{t('当前系统', 'Current system')}: {os_name} {os_release}"), style=style)
         if subprocess.run(["where", "adb.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True).returncode != 0:
-            print_formatted_text(HTML(ERROR + "未找到 ADB 可执行文件"), style=style)
-            pause()
+            print_formatted_text(HTML(ERROR + t("未找到 ADB 可执行文件", "ADB executable not found")), style=style)
+            pause(t("按任意键退出", "Press any key to exit"))
             return False
         adb_process = subprocess.Popen(["adb.exe", "version"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=True)
         adb_process.wait()
         if adb_process.returncode != 0:
-            print_formatted_text(HTML(ERROR + f"ADB检查失败，返回值：{adb_process.returncode}"), style=style)
+            print_formatted_text(HTML(ERROR + f"ADB{t('检查失败，返回值', 'check failed, return code')}：{adb_process.returncode}"), style=style)
             return False
-        print_formatted_text(HTML(INFO + "检查ADB命令成功"), style=style)
-    print_formatted_text(HTML(INFO + "单击此字符或按任意键继续进入主界面"), style=style)
+        print_formatted_text(HTML(INFO + t("检查ADB命令成功", "ADB check successful")), style=style)
 
-    pause()
+    pause(t("单击此字符或按任意键继续", "Click or press any key to continue"))
     flag = True
     clear()
     return True
@@ -1126,7 +736,7 @@ def pre_main() -> bool:
 
 @onerror
 def cleanup(code: int = 0):
-    print_formatted_text(HTML(INFO + "正在结束ADB服务..."), style=style)
+    print_formatted_text(HTML(INFO + t("正在结束ADB服务...", "Stopping ADB service...")), style=style)
     if check_adb_server()[0]:
         subprocess.Popen(["adb.exe", "kill-server"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
     sys.exit(code)
@@ -1135,48 +745,36 @@ def cleanup(code: int = 0):
 class AndroidToolkit(object):
     """High-level controller for preflight, menu loop, and action dispatch."""
 
-    def __init__(self) -> None: ...
+    def __init__(self, lang: str) -> None:
+        self.lang = lang
+
     def _run_pre_main(self) -> bool:
-        return pre_main() if not flag else True
+        return pre_main(self.lang) if not flag else True
 
     def _handle_action(self, action: str) -> Optional[int]:
-        if action == "SHIFT_D":
-            debug()
-            return None
-        if action == "onekeyroot":
-            root()
-            return None
-        if action == "gbl":
-            qcom_gbl()
-            return None
-        if action == "openshell":
-            clear()
-            subprocess.run(["cmd.exe", "/k"], shell=True)
-            clear()
-            return None
-        if action == "about":
-            about()
-            return None
-        if action == "mods":
-            mod()
-            return None
-        if action == "commonly":
-            commonly()
-            return None
-        if action == "user-debug":
-            userdebug()
-            return None
-        if action == "man-apps":
-            appset()
-            return None
-        if action == "magisk-mod":
-            magisk()
-            return None
-        if action == "help-links":
-            help_menu()
-            return None
-        if action == "exit":
-            return 0
+        match action:
+            case "onekeyroot":
+                root()
+            case "gbl":
+                qcom_gbl()
+            case "openshell":
+                clear()
+                subprocess.run(["cmd.exe", "/k"], shell=True)
+                clear()
+            case "about":
+                about()
+            case "mods":
+                mod()
+            case "commonly":
+                commonly()
+            case "user-debug":
+                userdebug()
+            case "man-apps":
+                appset()
+            case "magisk-mod":
+                magisk()
+            case "exit":
+                return 0
         return None
 
     def run(self) -> int:
@@ -1192,13 +790,13 @@ class AndroidToolkit(object):
                 if maybe_code is not None:
                     return maybe_code
         except KeyboardInterrupt:
-            print_formatted_text(HTML("\n" + WARN + "检测到用户中断，正在退出..."), style=style)
+            print_formatted_text(HTML("\n" + WARN + t("检测到用户中断，正在退出...", "User interruption detected, exiting...")), style=style)
             return 0
 
 
 @onerror
-def main() -> int:
-    return AndroidToolkit().run()
+def main(lang: str) -> int:
+    return AndroidToolkit(lang).run()
 
 
 if __name__ == "__main__":
@@ -1212,7 +810,12 @@ if __name__ == "__main__":
     formatter = MultilineFormatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+    
+    parser = argparse.ArgumentParser(description="AndroidToolkit - A community-driven TUI tool for Android management")
+    parser.add_argument("--lang", choices=["en", "zh", "default"], help="Set the language for the interface (en or zh)", default=None)
+    args = parser.parse_args()
+    lang = args.lang if args.lang else os.environ.get("ATB_LANG", "default")
 
-    exit_code = main()
+    exit_code = main(lang)
     logger.debug("ATBExitEvent, main returned: %s", exit_code)
     cleanup(exit_code)
