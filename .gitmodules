@@ -1,6 +1,6 @@
 [submodule "src/FileDialog"]
 	path = src/FileDialog
-	url = https://github.com/LesFerch/FileDialog.git
+	url = https://github.com/Starry2233/FileDialog.git
 [submodule "src/wezterm"]
 	path = src/wezterm
 	url = https://github.com/AllToolBox-SC/wezterm.git
