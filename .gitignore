@@ -45,3 +45,5 @@ tmp*/
 pip*/
 src/build_info.py
 logs/
+/bin
+/dist

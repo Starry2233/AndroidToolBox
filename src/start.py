@@ -2,8 +2,8 @@
 
 """AndroidToolkit startup script and interactive menu entrypoint."""
 
-# Hidden import to ensure CFFI modules are properly included in Nuitka builds
-import _cffi_backend # noqa: F401
+# Hidden import to ensure required modules are properly included in Nuitka builds
+import _requirements # noqa: F401
 import logging
 import os
 import sys
@@ -35,6 +35,8 @@ import subprocess
 import socket
 import traceback
 import threading
+import json
+import lolcat_lib
 # TODO: Plugin system
 import pluginutils, pluginutils.load, pluginutils.manage # noqa: F401
 import argparse
@@ -44,6 +46,10 @@ except ImportError:
     import termios
     import tty
     import select
+
+from FileDialog.dialog import open_file
+from compose.phoneroot import PhoneRoot, PhoneRootError
+from compose.settings import SettingsUI
 
 
 style = Style.from_dict({
@@ -71,7 +77,7 @@ def _init_labels():
     global INFO, ERROR, WARN
     _labels_cache.clear()
     INFO = f"<info>{t('[信息]', '[INFO]')}</info>"
-    ERROR = f"<error>{t('[错误]', '[ERROR]')}</error>"
+    ERROR = f"<red>{t('[错误]', '[ERROR]')}</red>"
     WARN = f"<orange>{t('[警告]', '[WARN]')}</orange>"
 
 flag = False
@@ -114,8 +120,7 @@ def auto_clear(fn=None, *, logo=False, end=False):
         def wrapper(*args, **kwargs):
             clear()
             if logo:
-                # TODO: 恢复外部批处理调用: run("call .\\logo.bat")
-                pass
+                print_formatted_text(ANSI(lolcat_lib.lolcat_file(os.path.join(os.path.dirname(__file__), "logo.txt"))))
             result = func(*args, **kwargs)
             if end: clear()
             return result
@@ -123,6 +128,24 @@ def auto_clear(fn=None, *, logo=False, end=False):
 
     return decorator(fn) if fn is not None else decorator
 
+
+def get_config(key: str, default: Optional[object] = None, type: Optional[type] = None, config_path: Optional[str] = None):
+    try:
+        path = config_path or os.path.join(os.path.dirname(__file__), "config.json")
+        with open(path, "r", encoding="utf-8") as f:
+            config: dict = json.load(f)
+            value = config.get(key, default)
+            if type != None:
+                try:
+                    value = type(value)
+                except (ValueError, TypeError):
+                    logger.error(f"Error converting config value for key '{key}' to type {type.__name__}")
+                    return default
+            return value
+    except (FileNotFoundError, json.JSONDecodeError, OSError, PermissionError, IsADirectoryError, RuntimeError, AttributeError) as e:
+        logger.error(f"Error loading config: {e}")
+        return default
+    
 
 def run(
     cmd: str,
@@ -264,7 +287,7 @@ def pause(message: str = "Click or press any key to continue", style_override: O
 def check_adb_server() -> Tuple[bool, Optional[Exception]]:
     adb_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # ADB Server request timeout: fast 0.2, usually 0.25, default 0.3, slowly 0.6
-    adb_server.settimeout(0.3)
+    adb_server.settimeout(get_config("timeout_adb", 0.3))
     try:
         adb_server.connect(("127.0.0.1", 5037))
     except socket.timeout:
@@ -302,11 +325,11 @@ def menu() -> str:
         Option("about", t("关于脚本", "About")),
         Option("mods", t("扩展管理", "Extensions")),
         Option("commonly", t("常用合集[子菜单]", "Common Tools [Submenu]")),
-
         Option("man-apps", t("应用管理[子菜单]", "App Manager [Submenu]")),
         Option("magisk-mod", t("Magisk模块管理[子菜单]", "Magisk Modules [Submenu]")),
     ]
     options.append(Option("user-debug", t("高级菜单[子菜单]", "Advanced [Submenu]")))
+    options.append(Option("settings", t("设置", "Settings")))
     options.append(Option("exit", t("退出工具", "Exit")))
 
     kb = KeyBindings()
@@ -441,8 +464,40 @@ def root():
             case "A":
                 return
             case "1":
-                # TODO: 恢复外部批处理调用: run("call otherroot")
-                ...
+                _do_generic_root()
+
+
+def _do_generic_root():
+
+    magisk_apk = open_file(
+        title=t("选择 Magisk APK", "Select Magisk APK"),
+        start_path="",
+        filter="APK files|*.apk|All files|*.*"
+    )
+    if not magisk_apk or not os.path.exists(magisk_apk):
+        print_formatted_text(HTML(ERROR + t("未选择有效的 APK 文件", "No valid APK file selected")), style=style)
+        return
+
+    magiskboot = open_file(
+        title=t("选择 magiskboot 文件", "Select magiskboot file"),
+        start_path="",
+        filter="All files|*.*"
+    )
+    if not magiskboot or not os.path.exists(magiskboot):
+        print_formatted_text(HTML(ERROR + t("未选择有效的 magiskboot 文件", "No valid magiskboot file selected")), style=style)
+        return
+
+    pr = PhoneRoot(
+        magisk_apk_path=magisk_apk,
+        magiskboot_path=magiskboot,
+    )
+
+    try:
+        pr.full_root_flow()
+    except PhoneRootError as e:
+        print_formatted_text(HTML(ERROR + f" {str(e)}"), style=style)
+    finally:
+        pr.cleanup()
 
 
 @onerror
@@ -773,6 +828,8 @@ class AndroidToolkit(object):
                 appset()
             case "magisk-mod":
                 magisk()
+            case "settings":
+                SettingsUI().run()
             case "exit":
                 return 0
         return None
@@ -784,7 +841,7 @@ class AndroidToolkit(object):
                 return 1
             while True:
                 clear()
-                run("call logo")
+                print_formatted_text(ANSI(lolcat_lib.lolcat_file(os.path.join(os.path.dirname(__file__), "logo.txt"))))
                 selection = menu()
                 maybe_code = self._handle_action(selection)
                 if maybe_code is not None:

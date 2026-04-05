@@ -10,6 +10,7 @@ import shutil
 import argparse
 import py7zr
 import filehash
+import traceback
 
 # Initialize colorama
 colorama.init(autoreset=True)
@@ -207,6 +208,10 @@ class AtbBuild(object):
 
         self.run_command(["cargo", "fetch"])
         self.run_command([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+        maturin_cmd = [sys.executable, "-m", "maturin", "develop"]
+        if self.is_release:
+            maturin_cmd.append("--release")
+        self.run_command(maturin_cmd)
         
         if self.verbose == 0:
             time.sleep(0.2)
@@ -221,7 +226,7 @@ class AtbBuild(object):
         # MSVC Build
         self.run_command(["cl.exe", "/MT", "/EHsc", "/Fobuild/launch.obj", "src\\launch.cpp", 
                           "/source-charset:utf-8", "/execution-charset:gbk", 
-                          "/Fe:build\\main\\launcher.exe", "/O2", 
+                          "/Fe:build\\main\\ToolkitLauncher.exe", "/O2", 
                           "/link", "/MACHINE:x64", "advapi32.lib", "user32.lib", "shell32.lib"])
         
         # Nuitka flags
@@ -260,9 +265,41 @@ class AtbBuild(object):
         for src, out in files:
             if src in self.py_fresh:
                 continue
-            cmd = [sys.executable, "-m", "nuitka", "--onefile", src, "--output-dir=./build/py/", f"--output-filename={out}", "--msvc=latest"] + nuitka_flags
+            cmd = [sys.executable, "-m", "nuitka", "--standalone", src, "--output-dir=./build/py/", f"--output-filename={out}", "--msvc=latest", "--onefile-no-compression", "--enable-plugins=upx"] + nuitka_flags
+            if out != "main.exe":
+                cmd += ["--python-flag=no_site", "--nofollow-imports"]
+            else:
+                cmd += ["--follow-imports", "--follow-import-to=clr", "--follow-import-to=ctypes", "--follow-import-to=pythonnet", "--follow-import-to=clr_loader", "--follow-import-to=cffi", "--follow-import-to=_cffi_backend", "--follow-import-to=pycparser"]
             if self.run_command(cmd):
                 shutil.copy2(src, f"./build/py/{out[:-4]}.py")
+        # self.run_command([
+        #                     sys.executable, 
+        #                     "-m",
+        #                     "nuitka", 
+        #                     "--module", 
+        #                     "src/FileDialog/dialog.py", 
+        #                     "--output-dir=./build/main/", 
+        #                     "--follow-import-to=clr", 
+        #                     "--follow-import-to=ctypes", 
+        #                     "--follow-import-to=sys", 
+        #                     "--follow-import-to=os", 
+        #                     "--follow-import-to=pythonnet", 
+        #                     "--follow-import-to=clr_loader", 
+        #                     "--follow-import-to=cffi", 
+        #                     "--follow-import-to=_cffi_backend", 
+        #                     "--follow-import-to=pycparser",
+        #                     "--enable-plugins=upx"
+        #                   ])
+        
+        # for root, directorys, files in os.walk("./build/main/dialog.build"):
+        #     for file in files:
+        #         os.remove(os.path.join(root, file))
+        #     for dir in directorys:
+        #         shutil.rmtree(os.path.join(root, dir))
+
+        # shutil.rmtree("./build/main/dialog.build", ignore_errors=True)
+        # os.remove("./build/main/dialog.pyi")
+        
 
         # Cargo Build
         cargo_cmd = ["cargo", "build"]
@@ -271,7 +308,7 @@ class AtbBuild(object):
         self.run_command(cargo_cmd)
 
         # Dotnet Build
-        dotnet_cmd = ["dotnet.exe", "build", "./src/FileDialog/FileDialog.csproj", "-c", "Debug" if not self.is_release else "Release",
+        dotnet_cmd = ["dotnet.exe", "build", "./src/FileDialog/FileDialog.sln", "-c", "Debug" if not self.is_release else "Release",
                         "-o", "./build/FileDialog/", "-p:BaseIntermediateOutputPath=../../build/FileDialog/obj/"]
         if self.verbose >= 2: dotnet_cmd += ["-v", "n"]
         self.run_command(dotnet_cmd)
@@ -283,15 +320,32 @@ class AtbBuild(object):
         # Finalization
         try:
             os.makedirs("./build/main", exist_ok=True)
-            for exe in ["main.exe", "menu.exe", "repair.exe", "run_cmd.exe"]:
-                shutil.copy2(f"./build/py/{exe}", f"./build/main/{exe}")
+            for exe in ["menu", "repair", "run_cmd"]:
+                shutil.copy2(f"./build/py/{exe}.dist/{exe}.exe", f"./build/main/{exe}.exe")
             for exe in ["lolcat.exe", "jsonutil.exe"]:
                 shutil.copy2(f"./build/rust/{"debug" if not self.is_release else "release"}/{exe}", f"./build/main/{exe}")
             shutil.copy2("./build/FileDialog/FileDialog.exe", "./build/main/FileDialog.exe")
+            shutil.copy2("./build/FileDialog/FileDialog.exe.config", "./build/main/FileDialog.exe.config")
+            shutil.copy2("./build/FileDialog/FileDialogLib.dll", "./build/main/FileDialogLib.dll")
+            shutil.copy2("./build/FileDialog/FileDialogLib.dll.config", "./build/main/FileDialogLib.dll.config")
+            
+            shutil.copy2("./src/logo.txt", "./build/main/logo.txt")
+
+            src = "./build/py/start.dist"
+            dst = "./build/main"
+            os.makedirs(dst, exist_ok=True)
+            for root, _, files in os.walk(src):
+                for file in files:
+                    src_path = os.path.join(root, file)
+                    rel = os.path.relpath(src_path, src)
+                    dst_path = os.path.join(dst, rel)
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
 
             with py7zr.SevenZipFile('bin.7z', mode='r') as z:
                 z.extractall(path='./build/main')
         except Exception as e:
+            traceback.print_exc()
             self.errs += 1
             self.success = False
             return

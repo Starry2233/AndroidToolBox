@@ -9,8 +9,16 @@ import adbutils
 from adbutils import adb
 from prompt_toolkit import print_formatted_text, HTML
 from prompt_toolkit.styles import Style
-from utils.lang import t
+import utils.device_check
+from utils.lang import t # noqa: F401
+from FileDialog.dialog import * # noqa: F401
+import ctypes
 
+try:
+    kernel32 = ctypes.windll.kernel32
+    kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+except Exception:
+    pass
 
 STYLE = Style.from_dict({
     "yellow": "fg:#f1c40f",
@@ -30,15 +38,15 @@ WARN = t("[警告]", "[Warn]")
 
 
 def _info(msg: str):
-    print_formatted_text(HTML(f"<info>{INFO}</info> {msg}"), style=STYLE)
+    print_formatted_text(HTML(f"<info>{INFO}</info>{msg}"), style=STYLE)
 
 
 def _error(msg: str):
-    print_formatted_text(HTML(f"<red>{ERROR}</red> {msg}"), style=STYLE)
+    print_formatted_text(HTML(f"<red>{ERROR}</red>{msg}"), style=STYLE)
 
 
 def _warn(msg: str):
-    print_formatted_text(HTML(f"<orange>{WARN}</orange> {msg}"), style=STYLE)
+    print_formatted_text(HTML(f"<orange>{WARN}</orange>{msg}"), style=STYLE)
 
 
 def _ok(msg: str):
@@ -100,6 +108,17 @@ class PhoneRoot(object):
         device.sync.push(self.magisk_apk_path, dest)
         return dest
 
+    def _partition_exists(self, device: adbutils.AdbDevice, partition: str) -> bool:
+        paths = [
+            f"/dev/block/by-name/{partition}",
+            f"/dev/block/bootdevice/by-name/{partition}",
+        ]
+        for path in paths:
+            result = device.shell(f"ls {path}")
+            if "No such file" not in result and result.strip():
+                return True
+        return False
+
     def extract_boot_image(self, partition: str = "boot", serial: Optional[str] = None) -> str:
         device = self._get_device(serial)
         self._ensure_tmp_dir()
@@ -117,16 +136,28 @@ class PhoneRoot(object):
                 break
 
         if not src_path:
-            raise PhoneRootError(t(f"无法找到 {partition} 分区路径", f"Cannot find {partition} partition path"))
+            _warn(t(f"无法找到 {partition} 分区路径，尝试从设备提取失败", f"Cannot find {partition} partition path, auto-extraction failed"))
+            _info(t("请手动选择镜像文件", "Please select the image file manually"))
 
-        remote_tmp = "/data/local/tmp/boot.img"
+            selected = open_file(
+                title=t(f"选择 {partition}.img 镜像文件", f"Select {partition}.img file"),
+                start_path="",
+                filter=f"{partition} images|*{partition}.img|All files|*.*"
+            )
+
+            if not selected or not os.path.exists(selected):
+                raise PhoneRootError(t(f"未选择有效的 {partition}.img 文件", f"No valid {partition}.img file selected"))
+
+            return selected
+
+        remote_tmp = f"/data/local/tmp/{partition}.img"
         device.shell(f"su -c 'dd if={src_path} of={remote_tmp}'")
-        local_path = os.path.join(self._tmp_dir, "boot.img")
+        local_path = os.path.join(self._tmp_dir, f"{partition}.img")
         device.sync.pull(remote_tmp, local_path)
         device.shell(f"rm {remote_tmp}")
 
         if not os.path.exists(local_path):
-            raise PhoneRootError(t("提取 boot.img 失败", "Failed to extract boot.img"))
+            raise PhoneRootError(t(f"提取 {partition}.img 失败", f"Failed to extract {partition}.img"))
 
         return local_path
 
@@ -136,19 +167,19 @@ class PhoneRoot(object):
         _info(t("正在重启到 Fastboot 模式...", "Rebooting to Fastboot mode..."))
         time.sleep(5)
 
-    def flash_boot(self, boot_img_path: str, slot: Optional[str] = None):
+    def flash_boot(self, boot_img_path: str, partition: str = "boot", slot: Optional[str] = None):
         if not os.path.exists(boot_img_path):
             raise PhoneRootError(t(f"文件不存在: {boot_img_path}", f"File not found: {boot_img_path}"))
 
         cmd = [self.fastboot_exe, "flash"]
         if slot:
             cmd.append(slot)
-        cmd.extend(["boot", boot_img_path])
+        cmd.extend([partition, boot_img_path])
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             raise PhoneRootError(t(f"Fastboot 刷入失败: {result.stderr}", f"Fastboot flash failed: {result.stderr}"))
-        _ok(t("Boot 镜像刷入成功", "Boot image flashed successfully"))
+        _ok(t(f"{partition} 镜像刷入成功", f"{partition} image flashed successfully"))
 
     def reboot_device(self):
         subprocess.run([self.fastboot_exe, "reboot"], timeout=10)
@@ -158,6 +189,7 @@ class PhoneRoot(object):
         boot_img_path: str,
         magisk_version: str = "25",
         output_path: Optional[str] = None,
+        is_init_boot: bool = False,
     ) -> str:
         if not os.path.exists(self.magiskboot_path):
             raise PhoneRootError(t(f"magiskboot.exe 不存在: {self.magiskboot_path}", f"magiskboot.exe not found: {self.magiskboot_path}"))
@@ -181,7 +213,7 @@ class PhoneRoot(object):
         old_cwd = os.getcwd()
         try:
             os.chdir(work_dir)
-            self._run_magiskboot_patch(magisk_version, output_path)
+            self._run_magiskboot_patch(magisk_version, output_path, is_init_boot=is_init_boot)
         finally:
             os.chdir(old_cwd)
 
@@ -191,7 +223,7 @@ class PhoneRoot(object):
         _ok(t(f"修补成功: {output_path}", f"Patched: {output_path}"))
         return output_path
 
-    def _run_magiskboot_patch(self, version: str, output_path: str):
+    def _run_magiskboot_patch(self, version: str, output_path: str, is_init_boot: bool = False):
         boot_path = os.path.join(self._tmp_dir, "boot.img")
 
         subprocess.run(
@@ -228,21 +260,22 @@ class PhoneRoot(object):
             capture_output=True, timeout=30, check=True
         )
 
-        subprocess.run(
-            ["magiskboot.exe", "hexpatch", "kernel",
-             "49010054011440B93FA00F71E9000054010840B93FA00F7189000054001840B91FA00F7188010054",
-             "A1020054011440B93FA00F7140020054010840B93FA00F71E0010054001840B91FA00F7181010054"],
-            capture_output=True, timeout=10
-        )
-        subprocess.run(
-            ["magiskboot.exe", "hexpatch", "kernel", "821B8012", "E2FF8F12"],
-            capture_output=True, timeout=10
-        )
-        subprocess.run(
-            ["magiskboot.exe", "hexpatch", "kernel",
-             "77616E745F696E697472616D667300", "736B69705F696E697472616D667300"],
-            capture_output=True, timeout=10
-        )
+        if not is_init_boot:
+            subprocess.run(
+                ["magiskboot.exe", "hexpatch", "kernel",
+                 "49010054011440B93FA00F71E9000054010840B93FA00F7189000054001840B91FA00F7188010054",
+                 "A1020054011440B93FA00F7140020054010840B93FA00F71E0010054001840B91FA00F7181010054"],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ["magiskboot.exe", "hexpatch", "kernel", "821B8012", "E2FF8F12"],
+                capture_output=True, timeout=10
+            )
+            subprocess.run(
+                ["magiskboot.exe", "hexpatch", "kernel",
+                 "77616E745F696E697472616D667300", "736B69705F696E697472616D667300"],
+                capture_output=True, timeout=10
+            )
 
         new_boot = os.path.join(self._tmp_dir, "boot_new.img")
         subprocess.run(
@@ -267,15 +300,23 @@ class PhoneRoot(object):
         device = self._get_device(serial)
         _info(t(f"已连接设备: {device.serial}", f"Connected: {device.serial}"))
 
-        _info(t("[1/4] 正在提取 boot.img...", "[1/4] Extracting boot.img..."))
-        boot_path = self.extract_boot_image(serial=serial)
+        has_init_boot = self._partition_exists(device, "init_boot")
+        if has_init_boot:
+            _info(t("检测到 init_boot 分区 (Android 13+)", "Detected init_boot partition (Android 13+)"))
+            partition = "init_boot"
+        else:
+            _info(t("使用传统 boot 分区", "Using legacy boot partition"))
+            partition = "boot"
+
+        print_formatted_text(HTML(f"<white>{t(f'[1/4] 正在提取 {partition}.img...', f'[1/4] Extracting {partition}.img...')}</white>"), style=STYLE)
+        boot_path = self.extract_boot_image(partition=partition, serial=serial)
         _sub(f"  -> {boot_path}")
 
-        _info(t(f"[2/4] 正在修补 boot.img (Magisk v{magisk_version})...", f"[2/4] Patching boot.img (Magisk v{magisk_version})..."))
-        patched_path = self.patch_boot_image(boot_path, magisk_version)
+        print_formatted_text(HTML(f"<white>{t(f'[2/4] 正在修补 {partition}.img (Magisk v{magisk_version})...', f'[2/4] Patching {partition}.img (Magisk v{magisk_version})...')}</white>"), style=STYLE)
+        patched_path = self.patch_boot_image(boot_path, magisk_version, is_init_boot=(partition == "init_boot"))
         _sub(f"  -> {patched_path}")
 
-        _info(t("[3/4] 正在重启到 Fastboot 模式...", "[3/4] Rebooting to Fastboot..."))
+        print_formatted_text(HTML(f"<white>{t('[3/4] 正在重启到 Fastboot 模式...', '[3/4] Rebooting to Fastboot...')}</white>"), style=STYLE)
         self.reboot_to_fastboot(serial=serial)
 
         _info(t("等待设备进入 Fastboot...", "Waiting for Fastboot..."))
@@ -286,8 +327,8 @@ class PhoneRoot(object):
         else:
             raise PhoneRootError(t("设备未在 20 秒内进入 Fastboot 模式", "Device did not enter Fastboot mode within 20s"))
 
-        _info(t("[4/4] 正在刷入修补后的 boot.img...", "[4/4] Flashing patched boot.img..."))
-        self.flash_boot(patched_path, slot=slot)
+        print_formatted_text(HTML(f"<white>{t(f'[4/4] 正在刷入修补后的 {partition}.img...', f'[4/4] Flashing patched {partition}.img...')}</white>"), style=STYLE)
+        self.flash_boot(patched_path, partition=partition, slot=slot)
 
         if auto_reboot:
             _info(t("正在重启设备...", "Rebooting device..."))

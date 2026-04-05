@@ -1,0 +1,7 @@
+{
+  "lang": "zh",
+  "skip_platform_check": true,
+  "auto_clear": false,
+  "logo_enabled": false,
+  "timeout_adb": 0.0
+}

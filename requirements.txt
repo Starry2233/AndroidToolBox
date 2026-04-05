@@ -1,5 +1,4 @@
-# If you only use the nuitka build, you can remove this(pyinstaller)
-pyinstaller==6.17.0
+maturin==1.12.6
 py7zr==1.0.0
 tqdm==4.67.1
 requests==2.32.5
